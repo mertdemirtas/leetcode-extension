@@ -100,6 +100,15 @@ class Controller {
       const page = await this.client.submissions(slug, { offset: append ? current.offset : 0, lastKey: append ? current.lastKey : null });
       if (!active()) return;
       const records = page.submissions.map(item => submissionRecord(item, owner));
+      const finished = new Map(records.filter(record => record.status === 'complete').map(record => [record.remoteId, record]));
+      for (const local of this.journal.list()) {
+        if (!active()) return;
+        const remote = finished.get(local.remoteId);
+        if (remote && local.kind === 'submit' && local.owner === owner && local.slug === slug && local.status !== 'complete') {
+          await this.journal.update(local.id, { status: 'complete', result: remote.result, error: null, detailsLoaded: false });
+        }
+      }
+      if (!active()) return;
       this.submissions = { slug, owner, records: mergeSubmissions(append ? current.records : [], records), offset: (append ? current.offset : 0) + records.length, lastKey: page.lastKey, hasNext: page.hasNext, loading: false, error: null };
     } catch (error) {
       if (active()) this.submissions = { ...this.submissions, loading: false, error: error.message };

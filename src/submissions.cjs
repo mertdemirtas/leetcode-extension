@@ -2,11 +2,15 @@
 const { normalizeResult } = require('./judge.cjs');
 
 function submissionRecord(item, owner) {
+  // LeetCode returns strings such as "Not Pending", not just booleans.
+  const flag = typeof item.isPending === 'string' ? item.isPending.trim().toLowerCase() : item.isPending;
+  const finished = Number.isFinite(Number(item.status)) && Number(item.status) >= 10;
+  const pending = !finished && [true, 1, 'true', '1', 'pending'].includes(flag);
   return {
     id: `submission:${item.id}`, remoteId: item.id, kind: 'submit', local: false, owner, slug: item.titleSlug, title: item.title,
     language: item.lang, createdAt: new Date(Number(item.timestamp) * 1000).toISOString(),
-    status: item.isPending ? 'pending' : 'complete',
-    result: item.isPending ? undefined : normalizeResult({ status_code: item.status, status_msg: item.statusDisplay, status_runtime: item.runtime, status_memory: item.memory }, 'submit')
+    status: pending ? 'pending' : 'complete',
+    result: pending ? undefined : normalizeResult({ status_code: item.status, status_msg: item.statusDisplay, status_runtime: item.runtime, status_memory: item.memory }, 'submit')
   };
 }
 

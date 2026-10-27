@@ -170,6 +170,23 @@ test('stale server history and code responses cannot cross problem or account ch
   assert.ok(!JSON.stringify(controller.state()).includes('must remain private'));
 });
 
+test('final server history resolves a stale local waiting submission without losing code or resubmitting', async t => {
+  const { controller, problem } = await fixture(t);
+  await controller.openProblem('two-sum'); controller.connection = { status: 'connected', username: 'fixture-account' };
+  const local = await controller.journal.create({ kind: 'submit', problem, owner: 'fixture-account', language: 'python3', code: 'preserved submitted source', cases: [], fileUri: 'file:///tmp/two-sum.py' });
+  await controller.journal.update(local.id, { status: 'pending', remoteId: '42', error: 'Poll interrupted' });
+  controller.displayed = local.id;
+  controller.client.start = async () => { throw new Error('History must never submit code'); };
+  controller.client.submissions = async () => ({ submissions: [{ id: '42', titleSlug: 'two-sum', title: 'Two Sum', timestamp: '1793057511', status: 10, statusDisplay: 'Accepted', isPending: 'Not Pending' }], hasNext: false });
+  await controller.loadHistory();
+  const record = controller.journal.get(local.id);
+  assert.equal(record.status, 'complete'); assert.equal(record.result.verdict, 'Accepted');
+  assert.equal(record.code, 'preserved submitted source'); assert.equal(record.error, null);
+  assert.equal(controller.state().history.length, 1);
+  assert.equal(controller.state().history[0].result.verdict, 'Accepted');
+  assert.equal(controller.state().record.result.accepted, true);
+});
+
 test('legacy cached descriptions are refreshed to include company tags and hints', async t => {
   const { controller, problem } = await fixture(t); let fetches = 0;
   controller.saved.problems['two-sum'] = { ...problem, detailsVersion: undefined, hints: undefined };

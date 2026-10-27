@@ -4,6 +4,22 @@ const assert = require('node:assert/strict');
 const { submissionRecord, submissionResult, mergeSubmissions } = require('../src/submissions.cjs');
 const { normalizeResult } = require('../src/judge.cjs');
 
+test('LeetCode string pending flags cannot hide an accepted or rejected final verdict', () => {
+  const item = { id: '42', titleSlug: 'two-sum', timestamp: '1793057511' };
+  for (const flag of ['Not Pending', 'not pending', 'false', '0', false, 0, null, undefined, true, 'Pending']) {
+    for (const [status, statusDisplay] of [[10, 'Accepted'], [11, 'Wrong Answer'], [14, 'Time Limit Exceeded'], [20, 'Compile Error']]) {
+      const record = submissionRecord({ ...item, status, statusDisplay, isPending: flag }, 'fixture-account');
+      assert.equal(record.status, 'complete', `${statusDisplay}: ${String(flag)}`);
+      assert.equal(record.result.verdict, statusDisplay);
+      assert.equal(record.result.accepted, status === 10);
+    }
+  }
+  for (const flag of [true, 1, 'true', '1', 'Pending', ' pending ']) {
+    const record = submissionRecord({ ...item, status: 0, isPending: flag }, 'fixture-account');
+    assert.equal(record.status, 'pending'); assert.equal(record.result, undefined);
+  }
+});
+
 test('submission history excludes runs and deduplicates local submissions against the server list', () => {
   const remote = submissionRecord({ id: '42', titleSlug: 'two-sum', title: 'Two Sum', lang: 'python3', status: 10, statusDisplay: 'Accepted', timestamp: '1793057511', runtime: '3 ms', memory: '19.2 MB' }, 'fixture-account');
   const local = { ...remote, id: 'local-42', local: true, code: 'saved code' };

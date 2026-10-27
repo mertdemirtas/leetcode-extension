@@ -38,7 +38,7 @@ const { pathToFileURL } = require('node:url');
       while(controller.restoring)await new Promise(resolve=>setTimeout(resolve,10));
       const problem=${JSON.stringify(problem)}; let posts=0;
       controller.client.problem=async()=>problem;
-      controller.client.submissions=async()=>({submissions:['1042839576','1042839577'].map(id=>({id,titleSlug:'two-sum',title:'Two Sum',lang:'python3',status:10,statusDisplay:'Accepted',runtime:'3 ms',memory:'19.2 MB',timestamp:'1793057511'})),hasNext:false,lastKey:null});
+      controller.client.submissions=async()=>({submissions:['1042839576','1042839577'].map(id=>({id,titleSlug:'two-sum',title:'Two Sum',lang:'python3',status:10,statusDisplay:'Accepted',isPending:'Not Pending',runtime:'3 ms',memory:'19.2 MB',timestamp:'1793057511'})),hasNext:false,lastKey:null});
       controller.client.submissionDetails=async id=>({code:id==='1042839577'?'# Website submission fixture':problem.codeSnippets[0].code,statusCode:10,runtime:3,runtimeDisplay:'3 ms',runtimePercentile:91.8,runtimeDistribution:JSON.stringify({distribution:[[1,10],[2,20],[3,40],[4,20],[5,10]]}),memory:19200000,memoryDisplay:'19.2 MB',memoryPercentile:82.4,memoryDistribution:JSON.stringify({distribution:[[18000,10],[19000,40],[20000,30],[21000,20]]}),totalCorrect:63,totalTestcases:63,lang:{name:'python3'},question:{titleSlug:'two-sum'},user:{username:'fixture-account'}});
 
       const judgeResult={state:'SUCCESS',status_code:10,correct_answer:true,compare_result:'1',code_answer:['[0,1]'],expected_code_answer:['[0,1]'],status_runtime:'3 ms',status_memory:'19.2 MB',total_correct:63,total_testcases:63};
@@ -83,7 +83,7 @@ const { pathToFileURL } = require('node:url');
       assert.equal(posts,2);
       await controller.loadHistory();
       assert.equal(controller.state().history.length,2);
-      assert.ok(controller.state().history.every(record=>record.kind==='submit'));
+      assert.ok(controller.state().history.every(record=>record.kind==='submit'&&record.status==='complete'&&record.result?.verdict==='Accepted'));
       await controller.message({type:'snapshot',id:'submission:1042839577'});
       assert.ok(v.workspace.textDocuments.some(document=>document.getText()==='# Website submission fixture'));
       await controller.message({type:'selectAttempt',id:'submission:1042839577'});
