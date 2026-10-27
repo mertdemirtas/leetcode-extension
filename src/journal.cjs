@@ -43,8 +43,8 @@ class Journal {
       createdAt: new Date().toISOString(), status: 'prepared'
     };
     this.records.unshift(record);
-    let completed = 0;
-    this.records = this.records.filter(item => item.status !== 'complete' || ++completed <= 100);
+    const completed = { run: 0, submit: 0 };
+    this.records = this.records.filter(item => item.status !== 'complete' || (completed[item.kind] = (completed[item.kind] || 0) + 1) <= 100);
     await this.persist();
     return structuredClone(record);
   }

@@ -87,6 +87,33 @@
   const titleOf = record => record.result?.verdict || ({ sending: 'Sending…', prepared: 'Saving snapshot…', pending: 'Waiting for a result', uncertain: 'Delivery unconfirmed', failed: 'Request failed', reviewed: 'Reviewed in browser' }[record.status] || record.status);
   const colorOf = record => record.result?.passed || record.result?.accepted ? 'good' : record.result ? 'bad' : ['uncertain', 'pending', 'sending'].includes(record.status) ? 'warn' : 'muted';
 
+  function beats(value) {
+    const valid = ['number', 'string'].includes(typeof value) && String(value).trim() && Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 100;
+    return valid ? `Beats ${Number(value).toFixed(2)}%` : 'Beats unavailable';
+  }
+
+  function distributionChart(result, metric) {
+    const bins = result[metric + 'Distribution'];
+    if (!Array.isArray(bins) || !bins.length) return '';
+    const points = bins.filter(bin => Array.isArray(bin) && bin.length === 2 && bin.every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0));
+    if (!points.length) return '';
+    const value = result[metric + 'Value'];
+    const hasValue = typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const minimum = Math.min(...points.map(bin => bin[0]), ...(hasValue ? [value] : []));
+    const maximum = Math.max(...points.map(bin => bin[0]), ...(hasValue ? [value] : []));
+    const span = maximum - minimum || 1, count = Math.min(32, points.length);
+    const groups = Array.from({ length: count }, () => 0);
+    for (const [position, share] of points) groups[Math.min(count - 1, Math.floor((position - minimum) / span * count))] += share;
+    const peak = Math.max(...groups) || 1;
+    const label = metric === 'runtime' ? 'Runtime' : 'Memory';
+    const units = position => metric === 'runtime' ? `${Number(position.toFixed(2))} ms` : `${Number((position / 1000).toFixed(2))} MB`;
+    const bars = groups.map((share, index) => `<rect class="chart-bar" x="${16 + index * 288 / count}" y="${96 - share / peak * 72}" width="${Math.max(1, 288 / count - 2)}" height="${share / peak * 72}"><title>${esc(units(minimum + index / count * span))}–${esc(units(minimum + (index + 1) / count * span))}: ${share.toFixed(2)}% of submissions</title></rect>`).join('');
+    const marker = hasValue ? 16 + (value - minimum) / span * 288 : null;
+    return `<svg class="distribution-chart" viewBox="0 0 320 126" role="img" aria-label="${label} distribution${hasValue ? `; your result ${esc(units(value))}` : ''}"><title>${label} distribution across LeetCode submissions</title>${bars}<line class="chart-axis" x1="16" y1="97" x2="304" y2="97"/>${hasValue ? `<line class="chart-marker" x1="${marker}" y1="18" x2="${marker}" y2="98"/><circle class="chart-marker-dot" cx="${marker}" cy="18" r="3"/><text class="chart-caption" x="${Math.min(284, Math.max(36, marker))}" y="10" text-anchor="middle">You</text>` : ''}<text class="chart-caption" x="16" y="116">${esc(units(minimum))}</text><text class="chart-caption" x="304" y="116" text-anchor="end">${esc(units(maximum))}</text></svg>`;
+  }
+
+  const metricCard = (result, metric, label) => `<div class="metric"><label>${label}</label><div class="value">${esc(result[metric] || 'Not returned')}</div><div class="beats">${beats(result[metric + 'Percentile'])}</div>${distributionChart(result, metric)}</div>`;
+
   function io(input, actual, failed = false) {
     return `<div class="io"><div><label>Input</label><pre>${esc(input || 'Not provided by LeetCode')}</pre></div><div><label>Your output</label><pre class="${failed ? 'failed' : ''}">${esc(actual ?? 'Not returned')}</pre></div></div>`;
   }
@@ -97,10 +124,10 @@
     const result = r.result;
     let content = `<div class="result-title"><div><h2 class="${colorOf(r)}">${esc(titleOf(r))}</h2><div class="meta">${r.kind === 'run' ? 'Test run' : 'Submission'}${result?.totalCases !== null && result?.totalCases !== undefined ? ` · ${esc(result.totalCorrect ?? '—')} / ${esc(result.totalCases)} passed` : ''}</div></div>${state.changedSinceRun ? '<small class="warn">Code changed since this attempt</small>' : ''}</div>`;
     if (!result) {
-      content += `<div class="pending"><p>${esc(r.error || (state.busy ? 'Running on LeetCode…' : 'Check the pending result.'))}</p>${r.status === 'uncertain' ? r.kind === 'submit' ? '<p>Check LeetCode history before sending another submission.</p>' : '<p>You can run these tests again.</p>' : ''}<div class="result-actions">${r.remoteId && r.status === 'pending' ? button('resume', '↻ Check status', `data-id="${esc(r.id)}" ${busy()}`) : ''}${['uncertain','pending'].includes(r.status) ? r.kind === 'submit' ? button('submissionHistory', 'Open LeetCode history') + button('markReviewed', 'I checked history · mark reviewed', `data-id="${esc(r.id)}" ${busy()}`, 'quiet') : button('run', 'Run tests again', busy()) : ''}</div></div>`;
+      content += `<div class="pending"><p>${esc(r.error || (state.busy ? 'Running on LeetCode…' : 'Check the pending result.'))}</p>${r.status === 'uncertain' ? r.kind === 'submit' ? '<p>Check LeetCode history before sending another submission.</p>' : '<p>You can run these tests again.</p>' : ''}<div class="result-actions">${r.remoteId && r.status === 'pending' ? button('resume', '↻ Check status', `data-id="${esc(r.id)}" ${busy()}`) : ''}${['uncertain','pending'].includes(r.status) ? r.kind === 'submit' ? button('submissionHistory', 'Open LeetCode history') + (r.local === false ? '' : button('markReviewed', 'I checked history · mark reviewed', `data-id="${esc(r.id)}" ${busy()}`, 'quiet')) : button('run', 'Run tests again', busy()) : ''}</div></div>`;
     } else if (result.error) content += `<pre class="judge-error">${esc(result.error)}</pre>`;
     else if (result.accepted) {
-      content += `<div class="metrics"><div class="metric"><label>Runtime</label><div class="value">${esc(result.runtime || 'Not returned')}</div></div><div class="metric"><label>Memory</label><div class="value">${esc(result.memory || 'Not returned')}</div></div></div>`;
+      content += `<div class="metrics">${metricCard(result, 'runtime', 'Runtime')}${metricCard(result, 'memory', 'Memory')}</div>`;
     } else if (r.kind === 'run' && result.cases.length) {
       ui.caseIndex = Math.min(ui.caseIndex, result.cases.length - 1);
       const c = result.cases[ui.caseIndex];
@@ -115,8 +142,9 @@
   }
 
   function historyContent() {
-    if (!state.history.length) return '<p class="empty">No attempts saved for this problem yet.</p>';
-    return `<table class="history"><thead><tr><th>Verdict</th><th>Type</th><th>Language</th><th class="optional">When</th><th>Code</th></tr></thead><tbody>${state.history.map(r => `<tr><td>${button('selectAttempt', esc(titleOf(r)), `data-id="${esc(r.id)}"`, colorOf(r))}</td><td>${r.kind === 'run' ? 'Run' : 'Submit'}</td><td>${esc(r.language)}</td><td class="optional">${esc(formatTime(r.createdAt))}</td><td>${button('snapshot', 'View code', `data-id="${esc(r.id)}" title="Open the saved solution for this attempt"`, 'quiet')}</td></tr>`).join('')}</tbody></table>`;
+    const page = state.submissionHistory || {};
+    const records = state.history.filter(record => record.kind === 'submit');
+    return `<div class="history-controls">${button('loadHistory', page.loading ? 'Loading submissions…' : '↻ Refresh submissions', page.loading ? 'disabled' : '', 'quiet')}</div>${page.error ? `<p class="muted" role="status">${esc(page.error)}</p>` : ''}${records.length ? `<table class="history"><thead><tr><th>Verdict</th><th>Language</th><th class="optional">When</th><th>Code</th></tr></thead><tbody>${records.map(r => `<tr><td>${button('selectAttempt', esc(titleOf(r)), `data-id="${esc(r.id)}"`, colorOf(r))}</td><td>${esc(r.language)}</td><td class="optional">${esc(formatTime(r.createdAt))}</td><td>${button('snapshot', 'View code', `data-id="${esc(r.id)}" title="Open this submission's code"`, 'quiet')}</td></tr>`).join('')}</tbody></table>` : !page.loading ? '<p class="empty">No submissions for this problem yet.</p>' : ''}${page.hasNext ? `<div class="load-more">${button('moreHistory', 'Load older submissions', page.loading ? 'disabled' : '')}</div>` : ''}`;
   }
 
   function results() {
@@ -141,10 +169,10 @@
     const target = event.target.closest('button');
     if (!target) return;
     if (target.dataset.slug) { send('openProblem', { slug: target.dataset.slug }); return; }
-    if (target.dataset.tab) { ui.tab = target.dataset.tab; remember(); render(); return; }
+    if (target.dataset.tab) { ui.tab = target.dataset.tab; remember(); render(); if (ui.tab === 'history') send('loadHistory'); return; }
     if (target.dataset.case !== undefined) { ui.caseIndex = Number(target.dataset.case); remember(); render(); return; }
     const action = target.dataset.action;
-    if (['connect','refresh','exit','daily','more','showResults','toggleResults','minimize','clearError','chooseSavePath'].includes(action)) send(action);
+    if (['connect','refresh','exit','daily','more','showResults','toggleResults','minimize','clearError','chooseSavePath','loadHistory','moreHistory'].includes(action)) send(action);
     else if (action === 'browse') send('search', { search: '' });
     else if (action === 'run' || action === 'submit') { ui.tab = 'results'; remember(); send(action, { slug: state.problem.titleSlug, ...(mode === 'results' ? { cases: state.cases } : {}) }); }
     else if (action === 'addCase') { state.cases.push({ name: `Case ${state.cases.length + 1}`, input: '' }); ui.caseIndex = state.cases.length - 1; saveDraft(); render(); }
@@ -174,6 +202,7 @@
     if (selectedChanged) ui.caseIndex = 0;
     if (next.record && (next.record.id !== previousRecord?.id || next.record.status !== previousRecord?.status)) { ui.tab = 'results'; remember(); }
     state = next;
+    if (mode === 'results' && ui.tab === 'history' && selectedChanged) send('loadHistory');
     const focused = document.activeElement;
     if (mode === 'results' && ui.tab === 'cases' && focused?.dataset.field && !selectedChanged) return;
     if (mode === 'problems' && focused?.id === 'search' && !next.browser.loading) return;

@@ -8,6 +8,7 @@ const { Judge, exampleCases, validateCases } = require('./judge.cjs');
 const { prepareFiles } = require('./files.cjs');
 const { BrowserSignIn } = require('./auth.cjs');
 const { EXTENSIONS } = require('./languages.cjs');
+const { submissionRecord, submissionResult, mergeSubmissions } = require('./submissions.cjs');
 
 const PREFIX = 'singularityLeetcode';
 const esc = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -39,7 +40,13 @@ class Controller {
     this.connecting = false;
     this.saveQueue = Promise.resolve();
     this.panelQueue = Promise.resolve();
-    this.judge = new Judge({ client: this.client, journal, changed: record => { this.displayed = record.id; this.publish(); } });
+    this.submissions = { records: [] };
+    this.historyGeneration = 0;
+    this.detailRequests = new Map();
+    this.judge = new Judge({ client: this.client, journal, changed: record => {
+      this.displayed = record.id; this.publish();
+      if (record.kind === 'submit' && record.status === 'complete') void this.enrichSubmission(record).catch(() => {});
+    } });
   }
 
   config(key, fallback) { return vscode.workspace.getConfiguration('singularityLeetcode').get(key, fallback); }
@@ -55,7 +62,7 @@ class Controller {
   state() {
     const problem = this.problem();
     const history = this.journal.list().filter(r => r.slug === this.saved.selected && (!this.connection.username || r.owner === this.connection.username));
-    const selectedRecord = this.journal.get(this.displayed);
+    const selectedRecord = this.recordById(this.displayed);
     const record = selectedRecord?.slug === this.saved.selected && (!this.connection.username || selectedRecord.owner === this.connection.username) ? selectedRecord : history[0];
     const summary = record => {
       if (!record) return null;
@@ -65,8 +72,10 @@ class Controller {
     return {
       connection: this.connection, browser: this.browser, problem: problem ? { ...problem, codeSnippets: problem.codeSnippets.map(s => ({ lang: s.lang, langSlug: s.langSlug })) } : null,
       language: this.saved.language, cases: this.saved.cases[this.saved.selected] || [],
-      history: history.slice(0, 100).map(summary), record: summary(record), busy: this.judge.busy || Boolean(this.executing) || this.connecting || Boolean(this.restoring), connectionBusy: this.connecting || Boolean(this.restoring), authorizing: Boolean(this.browserAuth?.pending),
-      changedSinceRun: Boolean(record && this.currentHash && record.snapshot !== this.currentHash),
+      history: mergeSubmissions(history, this.remoteHistory()).map(summary),
+      submissionHistory: this.submissions.slug === this.saved.selected && this.submissions.owner === this.connection.username ? { loading: this.submissions.loading, error: this.submissions.error, hasNext: this.submissions.hasNext } : {},
+      record: summary(record), busy: this.judge.busy || Boolean(this.executing) || this.connecting || Boolean(this.restoring), connectionBusy: this.connecting || Boolean(this.restoring), authorizing: Boolean(this.browserAuth?.pending),
+      changedSinceRun: Boolean(record?.snapshot && this.currentHash && record.snapshot !== this.currentHash),
       resultsVisible: Boolean(this.views.get('results')?.visible),
       recent: this.saved.recent.map(slug => this.saved.problems[slug]).filter(Boolean).map(p => ({ titleSlug: p.titleSlug, title: p.title, questionFrontendId: p.questionFrontendId, difficulty: p.difficulty })),
       error: this.error || null
@@ -74,6 +83,60 @@ class Controller {
   }
 
   publish() { const state = this.state(); for (const view of this.views.values()) void view.webview.postMessage({ type: 'state', state }); }
+
+  remoteHistory() { return this.submissions.slug === this.saved.selected && this.submissions.owner === this.connection.username ? this.submissions.records : []; }
+  recordById(id) { return this.journal.get(id) || this.remoteHistory().find(record => record.id === id); }
+
+  async loadHistory(append = false) {
+    const slug = this.saved.selected, owner = this.connection.username, authVersion = this.authVersion;
+    if (!slug) return;
+    const current = this.submissions.slug === slug && this.submissions.owner === owner ? this.submissions : { slug, owner, records: [], offset: 0, lastKey: null };
+    if (current.loading || (append && !current.hasNext)) return;
+    const generation = ++this.historyGeneration;
+    this.submissions = { ...current, loading: true, error: null }; this.publish();
+    const active = () => generation === this.historyGeneration && authVersion === this.authVersion && slug === this.saved.selected && owner === this.connection.username;
+    try {
+      if (!owner || this.connection.status !== 'connected') throw new Error('Connect or refresh your account to load LeetCode submissions.');
+      const page = await this.client.submissions(slug, { offset: append ? current.offset : 0, lastKey: append ? current.lastKey : null });
+      if (!active()) return;
+      const records = page.submissions.map(item => submissionRecord(item, owner));
+      this.submissions = { slug, owner, records: mergeSubmissions(append ? current.records : [], records), offset: (append ? current.offset : 0) + records.length, lastKey: page.lastKey, hasNext: page.hasNext, loading: false, error: null };
+    } catch (error) {
+      if (active()) this.submissions = { ...this.submissions, loading: false, error: error.message };
+    } finally {
+      if (generation === this.historyGeneration && this.submissions.slug === slug && this.submissions.owner === owner) this.submissions.loading = false;
+      if (active()) this.publish();
+    }
+  }
+
+  async enrichSubmission(record) {
+    if (!record || record.kind !== 'submit' || !/^[1-9]\d*$/.test(record.remoteId || '') || record.detailsLoaded || this.connection.status !== 'connected') return record;
+    const owner = this.connection.username, authVersion = this.authVersion;
+    if (record.owner !== owner) throw new Error('Connect the account that submitted this code.');
+    const key = `${authVersion}:${owner}:${record.remoteId}`;
+    if (this.detailRequests.has(key)) return this.detailRequests.get(key);
+    const operation = (async () => {
+      const details = await this.client.submissionDetails(record.remoteId);
+      if (authVersion !== this.authVersion || owner !== this.connection.username) throw new Error('The connected account changed. Select the submission again.');
+      if (details.user.username !== owner || details.question.titleSlug !== record.slug) throw new Error('This submission belongs to a different account or problem.');
+      if (!Number.isInteger(details.statusCode) || details.statusCode < 10) return record;
+      const current = this.journal.get(record.id) || record;
+      const result = submissionResult(details);
+      for (const name of ['runtimePercentile', 'memoryPercentile']) result[name] ??= current.result?.[name] ?? null;
+      for (const name of ['runtimeDistribution', 'memoryDistribution']) if (!result[name].length) result[name] = current.result?.[name] || [];
+      const fields = { status: 'complete', detailsLoaded: true, result };
+      let updated;
+      if (this.journal.get(record.id)) updated = await this.journal.update(record.id, fields);
+      else {
+        updated = { ...record, ...fields, code: details.code, snapshot: hash(details.code) };
+        if (this.submissions.owner === owner && this.submissions.slug === record.slug) this.submissions.records = this.submissions.records.map(item => item.id === record.id ? updated : item);
+      }
+      this.publish();
+      return updated;
+    })();
+    this.detailRequests.set(key, operation);
+    try { return await operation; } finally { this.detailRequests.delete(key); }
+  }
 
   report(error, notify = true) {
     this.error = error.message || 'The operation could not be completed.';
@@ -162,6 +225,8 @@ class Controller {
     if (this.connecting && !this.browserAuth?.pending) throw new Error('Wait for connection validation to finish before signing out.');
     this.browserAuth?.cancel();
     this.authVersion++;
+    this.historyGeneration++;
+    this.submissions = { records: [] };
     this.judge.cancel();
     await this.client.disconnect();
     this.connection = { status: 'disconnected', username: null, error: null }; this.error = null;
@@ -276,6 +341,7 @@ class Controller {
     await vscode.commands.executeCommand('setContext', `${PREFIX}.resultsVisible`, true);
     await vscode.commands.executeCommand(`${PREFIX}.results.focus`, { preserveFocus: !focus });
     this.publish();
+    void this.enrichSubmission(this.recordById(this.state().record?.id)).catch(() => {});
   }
 
   toggleResults() {
@@ -369,16 +435,27 @@ class Controller {
       case 'saveCases': await this.updateCases(message.slug, message.cases); break;
       case 'showResults': await this.showResults(); break;
       case 'toggleResults': case 'minimize': await this.toggleResults(); break;
-      case 'selectAttempt':
-        if (this.journal.get(message.id)?.slug !== this.saved.selected) throw new Error('This attempt belongs to a different problem.');
-        this.displayed = message.id; this.publish(); break;
+      case 'loadHistory': await this.loadHistory(); break;
+      case 'moreHistory': await this.loadHistory(true); break;
+      case 'selectAttempt': {
+        const record = this.recordById(message.id);
+        if (!record || record.slug !== this.saved.selected || (this.connection.username && record.owner !== this.connection.username)) throw new Error('This submission belongs to a different account or problem.');
+        this.displayed = message.id; this.publish();
+        await this.enrichSubmission(record); break;
+      }
       case 'resume':
-        try { await this.judge.resume(message.id, this.connection.username); }
+        try {
+          if (this.journal.get(message.id)) await this.judge.resume(message.id, this.connection.username);
+          else await this.enrichSubmission(this.recordById(message.id));
+        }
         finally { this.publish(); }
         break;
       case 'snapshot': {
-        const record = this.journal.get(message.id);
-        if (!record) throw new Error('Attempt not found.');
+        let record = this.recordById(message.id);
+        if (!record || record.slug !== this.saved.selected || (this.connection.username && record.owner !== this.connection.username)) throw new Error('This submission belongs to a different account or problem.');
+        if (typeof record.code !== 'string') record = await this.enrichSubmission(record);
+        if (typeof record?.code !== 'string') throw new Error('Connect or refresh your account to retrieve the submitted code.');
+        if (record.slug !== this.saved.selected) throw new Error('The selected problem changed. Select the submission again.');
         const document = await vscode.workspace.openTextDocument({ content: record.code, language: ['python3', 'pythondata'].includes(record.language) ? 'python' : record.language === 'golang' ? 'go' : record.language === 'react' ? 'javascriptreact' : record.language === 'vanillajs' ? 'javascript' : record.language });
         await vscode.window.showTextDocument(document, { preview: false }); break;
       }

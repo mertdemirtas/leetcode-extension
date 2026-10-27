@@ -3,6 +3,18 @@
 const { ConnectionError } = require('./client.cjs');
 const STATUS = { 10: 'Accepted', 11: 'Wrong Answer', 12: 'Memory Limit Exceeded', 13: 'Output Limit Exceeded', 14: 'Time Limit Exceeded', 15: 'Runtime Error', 16: 'Internal Error', 20: 'Compile Error', 21: 'Unknown Error' };
 const array = value => value === undefined || value === null ? [] : Array.isArray(value) ? value : [String(value)];
+const numeric = value => ['number', 'string'].includes(typeof value) && String(value).trim() && Number.isFinite(Number(value)) ? Number(value) : null;
+const percentile = value => { const number = numeric(value); return number !== null && number >= 0 && number <= 100 ? number : null; };
+
+function distribution(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    const bins = Array.isArray(parsed) ? parsed : parsed?.distribution;
+    if (!Array.isArray(bins) || bins.length > 5000) return [];
+    return bins.filter(bin => Array.isArray(bin) && bin.length === 2 && numeric(bin[0]) !== null && numeric(bin[0]) >= 0 && percentile(bin[1]) !== null)
+      .map(bin => [Number(bin[0]), Number(bin[1])]).sort((a, b) => a[0] - b[0]);
+  } catch { return []; }
+}
 
 function exampleCases(problem) {
   const input = problem.exampleTestcases || problem.sampleTestCase || '';
@@ -34,7 +46,9 @@ function normalizeResult(raw, kind, cases = []) {
     verdict, accepted: kind === 'submit' && code === 10, passed: kind === 'run' ? verdict === 'All tests passed' : code === 10,
     runtime: raw.status_runtime ?? raw.display_runtime ?? (raw.runtime !== undefined ? `${raw.runtime} ms` : null),
     memory: raw.status_memory ?? (raw.memory !== undefined ? `${(Number(raw.memory) / 1024 / 1024).toFixed(1)} MB` : null),
-    runtimePercentile: raw.runtime_percentile ?? null, memoryPercentile: raw.memory_percentile ?? null,
+    runtimePercentile: percentile(raw.runtime_percentile), memoryPercentile: percentile(raw.memory_percentile),
+    runtimeValue: numeric(raw.runtime), memoryValue: numeric(raw.memory) === null ? null : Number(raw.memory) / 1000,
+    runtimeDistribution: distribution(raw.runtime_distribution), memoryDistribution: distribution(raw.memory_distribution),
     totalCorrect: raw.total_correct ?? null, totalCases: raw.total_testcases ?? null,
     error: raw.full_compile_error || raw.compile_error || raw.full_runtime_error || raw.runtime_error || '',
     failingInput: raw.last_testcase || '', stdout: array(raw.std_output),

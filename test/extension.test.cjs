@@ -119,6 +119,57 @@ test('the default-language setting is a dropdown covering every supported file t
   assert.equal(manifest.contributes.menus['view/title'][0].command, 'singularityLeetcode.toggleResults');
 });
 
+test('history loads website submissions, excludes test runs, and opens server code without exposing it to webviews', async t => {
+  const { controller, problem, api } = await fixture(t);
+  await controller.openProblem('two-sum');
+  controller.connection = { status: 'connected', username: 'fixture-account' };
+  const options = { problem, owner: 'fixture-account', language: 'python3', code: 'local submitted code', cases: [], fileUri: 'file:///tmp/two-sum.py' };
+  const local = await controller.journal.create({ ...options, kind: 'submit' });
+  await controller.journal.update(local.id, { status: 'complete', remoteId: '42', result: { accepted: true, verdict: 'Accepted' } });
+  const run = await controller.journal.create({ ...options, kind: 'run' });
+  await controller.journal.update(run.id, { status: 'complete', remoteId: 'runcode_1.2', result: { verdict: 'All tests passed' } });
+  controller.displayed = run.id;
+  let pages = 0;
+  const remote = id => ({ id, titleSlug: 'two-sum', title: 'Two Sum', lang: 'python3', status: 10, statusDisplay: 'Accepted', timestamp: '1793057511', runtime: '3 ms', memory: '19.2 MB' });
+  controller.client.submissions = async (slug, page) => { assert.equal(slug, 'two-sum'); pages++; assert.equal(page.offset, pages === 1 ? 0 : 2); return { submissions: pages === 1 ? [remote('42'), remote('43')] : [remote('44')], lastKey: 'cursor', hasNext: pages === 1 }; };
+  await controller.loadHistory();
+  assert.equal(controller.state().history.length, 2); assert.ok(controller.state().history.every(item => item.kind === 'submit'));
+  assert.ok(controller.state().history.some(item => item.id === local.id));
+  assert.equal(controller.state().record.kind, 'run', 'Filtering History must not remove the latest test result');
+  await controller.loadHistory(true); assert.equal(controller.state().history.length, 3);
+  controller.client.submissionDetails = async id => { assert.equal(id, '43'); return { code: 'exact website submission', statusCode: 10, runtime: 3, memory: 19200000, runtimeDisplay: '3 ms', memoryDisplay: '19.2 MB', runtimePercentile: 0, memoryPercentile: 100, runtimeDistribution: '{"distribution":[[3,100]]}', memoryDistribution: '{"distribution":[[19200,100]]}', lang: { name: 'python3' }, question: { titleSlug: 'two-sum' }, user: { username: 'fixture-account' } }; };
+  let opened;
+  api.workspace.openTextDocument = async value => { opened = value; return {}; };
+  await controller.message({ type: 'snapshot', id: 'submission:43' });
+  assert.equal(opened.content, 'exact website submission'); assert.equal(opened.language, 'python');
+  assert.ok(!JSON.stringify(controller.state()).includes('exact website submission'));
+  await controller.message({ type: 'selectAttempt', id: 'submission:43' });
+  assert.equal(controller.state().record.result.runtimePercentile, 0);
+  assert.equal(controller.state().record.result.memoryPercentile, 100);
+  controller.connection = { status: 'connected', username: 'different-account' };
+  assert.equal(controller.state().history.length, 0);
+  await assert.rejects(controller.message({ type: 'snapshot', id: 'submission:43' }));
+});
+
+test('stale server history and code responses cannot cross problem or account changes', async t => {
+  const { controller } = await fixture(t);
+  await controller.openProblem('two-sum'); controller.connection = { status: 'connected', username: 'fixture-account' };
+  let release;
+  controller.client.submissions = () => new Promise(resolve => { release = resolve; });
+  const loading = controller.loadHistory();
+  controller.saved.selected = 'other-problem';
+  release({ submissions: [], hasNext: false }); await loading;
+  controller.saved.selected = 'two-sum'; assert.equal(controller.submissions.loading, false);
+  controller.client.submissions = async () => ({ submissions: [{ id: '42', titleSlug: 'two-sum', timestamp: '1793057511', status: 10 }], hasNext: false });
+  await controller.loadHistory(); assert.equal(controller.state().history.length, 1);
+  controller.client.submissionDetails = () => new Promise(resolve => { release = resolve; });
+  const selection = controller.message({ type: 'selectAttempt', id: 'submission:42' });
+  controller.authVersion++; controller.connection = { status: 'connected', username: 'different-account' };
+  release({ code: 'must remain private', user: { username: 'fixture-account' }, question: { titleSlug: 'two-sum' }, statusCode: 10 });
+  await assert.rejects(selection, /account changed/);
+  assert.ok(!JSON.stringify(controller.state()).includes('must remain private'));
+});
+
 test('legacy cached descriptions are refreshed to include company tags and hints', async t => {
   const { controller, problem } = await fixture(t); let fetches = 0;
   controller.saved.problems['two-sum'] = { ...problem, detailsVersion: undefined, hints: undefined };

@@ -31,6 +31,12 @@ function validateRequestId(value) {
   return String(value);
 }
 
+function validateSubmissionId(value) {
+  const id = validateRequestId(value);
+  if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) throw new Error('Invalid submission ID.');
+  return id;
+}
+
 function questionExtras(question) {
   let stats;
   try { stats = typeof question.companyTagStats === 'string' ? JSON.parse(question.companyTagStats) : question.companyTagStats; }
@@ -150,6 +156,36 @@ class LeetCodeClient {
     return validateSlug(activeDailyCodingChallengeQuestion?.question?.titleSlug);
   }
 
+  async submissions(slug, { offset = 0, limit = 20, lastKey = null } = {}) {
+    validateSlug(slug);
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 50 || (lastKey !== null && (typeof lastKey !== 'string' || lastKey.length > 4096))) throw new Error('Invalid submission history page.');
+    const { questionSubmissionList: page } = await this.graphql(`query submissionList($offset: Int!, $limit: Int!, $lastKey: String, $questionSlug: String!) {
+      questionSubmissionList(offset: $offset, limit: $limit, lastKey: $lastKey, questionSlug: $questionSlug) {
+        lastKey hasNext submissions { id title titleSlug status statusDisplay lang runtime timestamp isPending memory }
+      }
+    }`, { offset, limit, lastKey, questionSlug: slug });
+    if (!Array.isArray(page?.submissions) || typeof page.hasNext !== 'boolean') throw new ConnectionError('protocol', 'LeetCode did not return submission history.');
+    const submissions = page.submissions.map(item => {
+      if (item.titleSlug !== slug || !Number.isFinite(Number(item.timestamp)) || Number(item.timestamp) <= 0 || !Number.isFinite(new Date(Number(item.timestamp) * 1000).getTime())) throw new ConnectionError('protocol', 'LeetCode returned invalid submission history.');
+      return { ...item, id: validateSubmissionId(item.id) };
+    });
+    return { submissions, hasNext: page.hasNext && submissions.length > 0, lastKey: typeof page.lastKey === 'string' ? page.lastKey : null };
+  }
+
+  async submissionDetails(id) {
+    const { submissionDetails: details } = await this.graphql(`query submissionDetails($submissionId: Int!) {
+      submissionDetails(submissionId: $submissionId) {
+        code timestamp statusCode runtime runtimeDisplay runtimePercentile runtimeDistribution
+        memory memoryDisplay memoryPercentile memoryDistribution totalCorrect totalTestcases
+        stdOutput lastTestcase codeOutput compileError runtimeError
+        lang { name } question { questionId title titleSlug } user { username }
+      }
+    }`, { submissionId: Number(validateSubmissionId(id)) });
+    if (!details || typeof details.code !== 'string' || details.code.length > 1_000_000 || typeof details.lang?.name !== 'string' || !details.user?.username) throw new ConnectionError('unavailable', 'The submitted code is unavailable for this account.');
+    validateSlug(details.question?.titleSlug);
+    return details;
+  }
+
   async start(kind, { problem, language, code, input }) {
     validateSlug(problem.titleSlug);
     if (!['run', 'submit'].includes(kind) || !problem.questionId || !/^[a-z0-9]+$/.test(language) || !code.trim()) throw new Error('A problem, language, and nonempty solution are required.');
@@ -170,4 +206,4 @@ class LeetCodeClient {
   }
 }
 
-module.exports = { LeetCodeClient, ConnectionError, SECRET_KEY, ORIGIN, validateCredentials, validateSlug, validateRequestId };
+module.exports = { LeetCodeClient, ConnectionError, SECRET_KEY, ORIGIN, validateCredentials, validateSlug, validateRequestId, validateSubmissionId };

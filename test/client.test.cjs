@@ -121,3 +121,29 @@ test('unavailable company fields do not invent tags or prevent opening a problem
   const problem = await client.problem('two-sum');
   assert.deepEqual(problem.hints, []); assert.deepEqual(problem.companies, []); assert.equal(problem.companiesAvailable, false);
 });
+
+test('authenticated submission history uses server pagination and retrieves submitted source and distributions', async () => {
+  const calls = [];
+  const details = { code: 'server submitted code', statusCode: 10, lang: { name: 'python3' }, question: { titleSlug: 'two-sum' }, user: { username: 'fixture-account' }, runtimePercentile: 95, memoryPercentile: 80, runtimeDistribution: '{"distribution":[[1,100]]}', memoryDistribution: '{"distribution":[[19000,100]]}' };
+  const client = new LeetCodeClient({ secrets: secrets(credentials), fetchImpl: async (_url, options) => {
+    assert.match(options.headers.Cookie, /LEETCODE_SESSION=/);
+    const body = JSON.parse(options.body); calls.push(body);
+    return response({ data: body.query.includes('questionSubmissionList') ? { questionSubmissionList: { hasNext: true, lastKey: 'next-page', submissions: [{ id: '2182661615', titleSlug: 'two-sum', timestamp: '1793057511' }] } } : { submissionDetails: details } });
+  } });
+  const page = await client.submissions('two-sum', { offset: 20, lastKey: 'previous-page' });
+  assert.equal(page.submissions[0].id, '2182661615'); assert.equal(page.hasNext, true);
+  assert.deepEqual(calls[0].variables, { offset: 20, limit: 20, lastKey: 'previous-page', questionSlug: 'two-sum' });
+  assert.deepEqual(await client.submissionDetails('2182661615'), details);
+  assert.equal(calls[1].variables.submissionId, 2182661615);
+  assert.match(calls[1].query, /runtimeDistribution/); assert.match(calls[1].query, /memoryDistribution/);
+  for (const id of ['../other', 'runcode_1.2', '01', '9007199254740992']) await assert.rejects(client.submissionDetails(id));
+  await assert.rejects(client.submissions('two-sum', { offset: -1 }));
+  assert.equal(calls.length, 2);
+});
+
+test('submission history rejects unrelated problems and invalid server data', async () => {
+  const client = new LeetCodeClient({ secrets: secrets(credentials), fetchImpl: async () => response({ data: { questionSubmissionList: { hasNext: true, submissions: [{ id: '42', titleSlug: 'other-problem', timestamp: '1793057511' }] } } }) });
+  await assert.rejects(client.submissions('two-sum'), { code: 'protocol' });
+  client.fetch = async () => response({ data: { submissionDetails: null } });
+  await assert.rejects(client.submissionDetails('42'), { code: 'unavailable' });
+});

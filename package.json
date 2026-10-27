@@ -2,7 +2,7 @@
   "name": "singularity-leetcode",
   "displayName": "LeetCode for Singularity and VS Code",
   "description": "Solve, run, and submit LeetCode problems with saved drafts and recoverable judge results.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "mertdemirtas",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/mertdemirtas/leetcode-extension.git" },

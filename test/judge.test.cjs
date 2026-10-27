@@ -136,3 +136,12 @@ test('test success is based on judge comparison; absent oracle does not claim a 
   assert.deepEqual(validateCases([{ input: '[3,3]\n6' }]), [{ input: '[3,3]\n6', name: 'Case 1' }]);
   assert.equal(normalizeResult({ status_code: 20, full_compile_error: 'SyntaxError' }, 'submit').error, 'SyntaxError');
 });
+
+test('completed test runs do not consume the retention limit for submitted source', async t => {
+  const journal = await setup(t);
+  const submitted = await journal.create(options()); await journal.update(submitted.id, { status: 'complete' });
+  journal.records.unshift(...Array.from({ length: 100 }, (_, index) => ({ id: 'run-' + index, kind: 'run', status: 'complete' })));
+  await journal.create({ ...options(), kind: 'run' });
+  assert.equal(journal.get(submitted.id).code, options().code);
+  assert.equal(journal.list().filter(record => record.kind === 'submit').length, 1);
+});
