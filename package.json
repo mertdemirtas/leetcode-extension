@@ -1,0 +1,68 @@
+{
+  "name": "singularity-leetcode",
+  "displayName": "LeetCode for Singularity and VS Code",
+  "description": "Solve, run, and submit LeetCode problems with saved drafts and recoverable judge results.",
+  "version": "0.1.4",
+  "publisher": "mertdemirtas",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/mertdemirtas/leetcode-extension.git" },
+  "homepage": "https://github.com/mertdemirtas/leetcode-extension#readme",
+  "bugs": { "url": "https://github.com/mertdemirtas/leetcode-extension/issues" },
+  "engines": { "vscode": "^1.95.0", "node": ">=18" },
+  "categories": ["Education", "Other"],
+  "keywords": ["leetcode", "singularity", "algorithms", "practice"],
+  "preview": true,
+  "main": "./src/extension.cjs",
+  "extensionKind": ["workspace"],
+  "activationEvents": ["onStartupFinished", "onUri", "onView:singularityLeetcode.problems", "onView:singularityLeetcode.results", "onCommand:singularityLeetcode.open"],
+  "capabilities": { "untrustedWorkspaces": { "supported": false }, "virtualWorkspaces": { "supported": false } },
+  "scripts": {
+    "check": "node scripts/check.cjs",
+    "test": "node scripts/test.cjs",
+    "test:ui": "node scripts/smoke-ui.cjs",
+    "test:live": "node scripts/smoke-live.cjs",
+    "package": "node scripts/package.cjs"
+  },
+  "devDependencies": { "@vscode/vsce": "^3.6.0", "playwright": "^1.56.0" },
+  "contributes": {
+    "commands": [
+      { "command": "singularityLeetcode.open", "title": "Open LeetCode", "category": "LeetCode", "icon": "$(code)" },
+      { "command": "singularityLeetcode.connect", "title": "Connect", "category": "LeetCode", "icon": "$(plug)" },
+      { "command": "singularityLeetcode.refresh", "title": "Refresh Connection", "category": "LeetCode", "icon": "$(refresh)" },
+      { "command": "singularityLeetcode.exit", "title": "Exit and Sign Out", "category": "LeetCode", "icon": "$(sign-out)" },
+      { "command": "singularityLeetcode.chooseSavePath", "title": "Choose Problem Save Folder", "category": "LeetCode", "icon": "$(folder-opened)" },
+      { "command": "singularityLeetcode.run", "title": "Run Test Cases", "category": "LeetCode", "icon": "$(play)" },
+      { "command": "singularityLeetcode.submit", "title": "Submit Solution", "category": "LeetCode", "icon": "$(cloud-upload)" },
+      { "command": "singularityLeetcode.showResults", "title": "Show Results", "category": "LeetCode", "icon": "$(layout-panel)" },
+      { "command": "singularityLeetcode.toggleResults", "title": "Toggle Tests & Results", "category": "LeetCode", "icon": "$(layout-panel)" }
+    ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "singularity-leetcode", "title": "LeetCode", "icon": "media/leetcode.svg" }],
+      "panel": [{ "id": "singularity-leetcode-results", "title": "LeetCode", "icon": "media/leetcode.svg" }]
+    },
+    "views": {
+      "singularity-leetcode": [{ "id": "singularityLeetcode.problems", "name": "Problems", "type": "webview" }],
+      "singularity-leetcode-results": [{ "id": "singularityLeetcode.results", "name": "Tests & Results", "type": "webview", "when": "singularityLeetcode.resultsVisible" }]
+    },
+    "menus": {
+      "editor/title": [
+        { "command": "singularityLeetcode.run", "when": "singularityLeetcode.solutionActive", "group": "navigation@1" },
+        { "command": "singularityLeetcode.submit", "when": "singularityLeetcode.solutionActive", "group": "navigation@2" },
+        { "command": "singularityLeetcode.toggleResults", "when": "singularityLeetcode.solutionActive", "group": "navigation@3" }
+      ],
+      "view/title": [{ "command": "singularityLeetcode.toggleResults", "when": "view == singularityLeetcode.results", "group": "navigation" }]
+    },
+    "keybindings": [
+      { "command": "singularityLeetcode.run", "key": "ctrl+enter", "mac": "cmd+enter", "when": "editorTextFocus && singularityLeetcode.solutionActive" },
+      { "command": "singularityLeetcode.submit", "key": "ctrl+shift+enter", "mac": "cmd+shift+enter", "when": "editorTextFocus && singularityLeetcode.solutionActive" }
+    ],
+    "configuration": {
+      "title": "LeetCode",
+      "properties": {
+        "singularityLeetcode.defaultLanguage": {"type":"string","default":"python3","description":"Preferred LeetCode language. Available choices for a problem are provided by LeetCode; choose another language when the default is unavailable.","enum":["cpp","java","python3","python","javascript","typescript","csharp","c","golang","kotlin","swift","rust","ruby","php","dart","scala","elixir","erlang","racket","bash","mysql","mssql","postgresql","oraclesql","pythondata","react","vanillajs"],"enumItemLabels":["C++","Java","Python3","Python (legacy)","JavaScript","TypeScript","C#","C","Go","Kotlin","Swift","Rust","Ruby","PHP","Dart","Scala","Elixir","Erlang","Racket","Bash","MySQL","MS SQL Server","PostgreSQL","Oracle SQL","Pandas","React","Vanilla JS"],"enumDescriptions":["C++","Java","Python3","Python (legacy)","JavaScript","TypeScript","C#","C","Go","Kotlin","Swift","Rust","Ruby","PHP","Dart","Scala","Elixir","Erlang","Racket","Bash","MySQL","MS SQL Server","PostgreSQL","Oracle SQL","Pandas","React","Vanilla JS"]},
+        "singularityLeetcode.savePath": { "type": "string", "default": "", "scope": "machine-overridable", "description": "Folder where solution files such as two-sum.py are saved directly. Problem metadata and test cases stay in private IDE storage. Accepts an absolute path, ~/path, or a path relative to the workspace. Leave empty to use the workspace's leetcode folder. Existing solution files are never overwritten. Applies when opening a problem." },
+        "singularityLeetcode.requestTimeout": { "type": "number", "default": 20000, "minimum": 5000, "maximum": 60000, "description": "Request timeout in milliseconds. Timed out submissions are never automatically resent." }
+      }
+    }
+  }
+}
