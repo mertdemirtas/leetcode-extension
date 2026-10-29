@@ -185,6 +185,25 @@ test('final server history resolves a stale local waiting submission without los
   assert.equal(controller.state().history.length, 1);
   assert.equal(controller.state().history[0].result.verdict, 'Accepted');
   assert.equal(controller.state().record.result.accepted, true);
+  controller.client.submissions = async () => ({ submissions: [{ id: '42', titleSlug: 'two-sum', timestamp: '1793057511', status: 11, statusDisplay: 'Wrong Answer', isPending: 'Not Pending' }], hasNext: false });
+  await controller.loadHistory();
+  assert.equal(controller.state().record.result.verdict, 'Wrong Answer');
+  assert.equal(controller.journal.get(local.id).code, 'preserved submitted source');
+});
+
+test('ambiguous historical rows get final detail verdicts, with genuine judging and unavailable states kept separate', async t => {
+  const { controller } = await fixture(t);
+  await controller.openProblem('two-sum'); controller.connection = { status: 'connected', username: 'fixture-account' };
+  controller.client.submissions = async () => ({ submissions: Array.from({ length: 5 }, (_, index) => ({ id: String(index + 41), titleSlug: 'two-sum', timestamp: '1793057511', status: 0, statusDisplay: 'Pending', isPending: 'Pending' })), hasNext: false });
+  controller.client.submissionStatus = async id => {
+    if (id === '45') throw new Error('Unavailable');
+    return { statusCode: { 41: 10, 42: 11, 43: 14, 44: 0 }[id], user: { username: 'fixture-account' }, question: { titleSlug: 'two-sum' } };
+  };
+  await controller.loadHistory();
+  const records = controller.state().history;
+  assert.deepEqual(records.slice(0, 3).map(record => record.result.verdict), ['Accepted', 'Wrong Answer', 'Time Limit Exceeded']);
+  assert.equal(records[3].verdictState, 'judging'); assert.equal(records[4].verdictState, 'unavailable');
+  assert.ok(records.every(record => record.kind === 'submit'));
 });
 
 test('legacy cached descriptions are refreshed to include company tags and hints', async t => {

@@ -84,7 +84,7 @@
   }
 
   const formatTime = value => new Date(value).toLocaleString();
-  const titleOf = record => record.result?.verdict || ({ sending: 'Sending…', prepared: 'Saving snapshot…', pending: 'Waiting for a result', uncertain: 'Delivery unconfirmed', failed: 'Request failed', reviewed: 'Reviewed in browser' }[record.status] || record.status);
+  const titleOf = record => record.result?.verdict || (record.local === false && record.status === 'pending' ? ({ fetching: 'Fetching verdict…', judging: 'Judging…', unavailable: 'Verdict unavailable' }[record.verdictState] || 'Fetching verdict…') : ({ sending: 'Sending…', prepared: 'Saving snapshot…', pending: 'Waiting for a result', uncertain: 'Delivery unconfirmed', failed: 'Request failed', reviewed: 'Reviewed in browser' }[record.status] || record.status));
   const colorOf = record => record.result?.passed || record.result?.accepted ? 'good' : record.result ? 'bad' : ['uncertain', 'pending', 'sending'].includes(record.status) ? 'warn' : 'muted';
 
   function beats(value) {

@@ -27,6 +27,14 @@ const { pathToFileURL } = require('node:url');
   isolatedManifest.publisher = 'leetcode-host-checks'; isolatedManifest.name = path.basename(temporary).toLowerCase();
   await fs.writeFile(path.join(plugin, 'package.json'), JSON.stringify(isolatedManifest));
   await fs.writeFile(path.join(plugin, '../extension.vsixmanifest'), '<PackageManifest/>');
+  if (process.env.LEETCODE_OLD_EXTENSION) {
+    const oldManifest = JSON.parse(await fs.readFile(path.join(process.env.LEETCODE_OLD_EXTENSION, 'package.json'), 'utf8'));
+    const oldPlugin = path.join(config, `deployedPlugins/${testExtensionId}@${oldManifest.version}/extension`);
+    await fs.cp(process.env.LEETCODE_OLD_EXTENSION, oldPlugin, { recursive: true });
+    oldManifest.publisher = isolatedManifest.publisher; oldManifest.name = isolatedManifest.name;
+    await fs.writeFile(path.join(oldPlugin, 'package.json'), JSON.stringify(oldManifest));
+    await fs.writeFile(path.join(oldPlugin, '../extension.vsixmanifest'), '<PackageManifest/>');
+  }
   const entry = path.join(plugin, 'src/extension.cjs');
   const original = await fs.readFile(entry, 'utf8');
   // Expose the controller only in this disposable instrumented copy, never in the shipped extension.
@@ -42,11 +50,13 @@ const { pathToFileURL } = require('node:url');
       if (action === 'seed') {
         const extension = v.extensions.getExtension(${JSON.stringify(testExtensionId)});
         if (!extension) throw new Error('LeetCode extension was not deployed');
+        assert.equal(extension.packageJSON.version, ${JSON.stringify(require('../package.json').version)});
         ({ controller } = await extension.activate());
         while (controller.restoring) await new Promise(resolve => setTimeout(resolve, 10));
         const problem = { questionId:'1', questionFrontendId:'1', title:'Two Sum', titleSlug:'two-sum', difficulty:'Easy', topicTags:[{name:'Array'},{name:'Hash table'}], content:'<p>Find two indices whose numbers add up to target.</p><pre>Input: nums = [2,7,11,15], target = 9\\nOutput: [0,1]</pre>', sampleTestCase:'[2,7,11,15]\\n9', metaData:JSON.stringify({params:[{},{}]}), codeSnippets:[{lang:'Python3',langSlug:'python3',code:'class Solution:\\n    def twoSum(self, nums, target):\\n        seen = {}\\n        for i, n in enumerate(nums):\\n            if target - n in seen:\\n                return [seen[target - n], i]\\n            seen[n] = i'}] };
         controller.client.problem = async () => problem;
-      controller.client.submissions=async()=>({submissions:['1042839576','1042839577'].map(id=>({id,titleSlug:'two-sum',title:'Two Sum',lang:'python3',status:10,statusDisplay:'Accepted',isPending:'Not Pending',runtime:'3 ms',memory:'19.2 MB',timestamp:'1793057511'})),hasNext:false,lastKey:null});
+      controller.client.submissions=async()=>({submissions:[['1042839576',10,'Accepted'],['1042839577',0,'Pending'],['1042839578',11,'Wrong Answer'],['1042839579',14,'Time Limit Exceeded']].map(([id,status,statusDisplay])=>({id,titleSlug:'two-sum',title:'Two Sum',lang:'python3',status,statusDisplay,isPending:status===0?'Pending':'Not Pending',runtime:'3 ms',memory:'19.2 MB',timestamp:'1793057511'})),hasNext:false,lastKey:null});
+      controller.client.submissionStatus=async()=>({statusCode:10,question:{titleSlug:'two-sum'},user:{username:'fixture-account'}});
       controller.client.submissionDetails=async id=>({code:id==='1042839577'?'# Website submission fixture':problem.codeSnippets[0].code,statusCode:10,runtime:3,runtimeDisplay:'3 ms',runtimePercentile:91.8,runtimeDistribution:JSON.stringify({distribution:[[1,10],[2,20],[3,40],[4,20],[5,10]]}),memory:19200000,memoryDisplay:'19.2 MB',memoryPercentile:82.4,memoryDistribution:JSON.stringify({distribution:[[18000,10],[19000,40],[20000,30],[21000,20]]}),totalCorrect:63,totalTestcases:63,lang:{name:'python3'},question:{titleSlug:'two-sum'},user:{username:'fixture-account'}});
 
         const judgeResult = {state:'SUCCESS',status_code:10,correct_answer:true,compare_result:'1',code_answer:['[0,1]'],expected_code_answer:['[0,1]'],status_runtime:'3 ms',status_memory:'19.2 MB',runtime_percentile:91.8,memory_percentile:82.4,total_correct:63,total_testcases:63};
@@ -153,7 +163,13 @@ const { pathToFileURL } = require('node:url');
     assert.equal((await command('state')).state.record.result.verdict, 'Accepted');
     await command('history');
     const history = (await command('state')).state.history;
-    assert.equal(history.length, 2); assert.ok(history.every(record => record.kind === 'submit' && record.status === 'complete' && record.result?.verdict === 'Accepted'));
+    assert.equal(history.length, 4); assert.ok(history.every(record => record.kind === 'submit' && record.status === 'complete'));
+    const historyFrame = await modeFrame('results');
+    await historyFrame.click('[data-tab="history"]');
+    await historyFrame.waitForFunction(() => document.querySelectorAll('.history tbody tr').length === 4);
+    const verdicts = await historyFrame.$$eval('.history tbody tr td:first-child button', nodes => nodes.map(node => node.textContent).sort());
+    assert.deepEqual(verdicts, ['Accepted','Accepted','Time Limit Exceeded','Wrong Answer']);
+    await page.screenshot({path:path.join(source,'test-artifacts/singularity-history.png'),fullPage:true});
     await command('snapshot'); await command('select');
     const finalResults = await modeFrame('results');
     await finalResults.waitForSelector('svg.distribution-chart');

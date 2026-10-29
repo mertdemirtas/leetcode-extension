@@ -147,3 +147,15 @@ test('submission history rejects unrelated problems and invalid server data', as
   client.fetch = async () => response({ data: { submissionDetails: null } });
   await assert.rejects(client.submissionDetails('42'), { code: 'unavailable' });
 });
+
+test('submission status lookup requests the verdict without downloading source code', async () => {
+  let query;
+  const client = new LeetCodeClient({ secrets: secrets(credentials), fetchImpl: async (_url, options) => {
+    query = JSON.parse(options.body).query;
+    return response({ data: { submissionDetails: { statusCode: '11', question: { titleSlug: 'two-sum' }, user: { username: 'fixture-account' } } } });
+  } });
+  const details = await client.submissionStatus('42'); assert.equal(details.statusCode, 11);
+  assert.ok(!/\bcode\b/.test(query));
+  client.fetch = async () => response({ data: { submissionDetails: { statusCode: null, user: { username: 'fixture-account' } } } });
+  await assert.rejects(client.submissionStatus('42'), { code: 'unavailable' });
+});

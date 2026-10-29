@@ -186,6 +186,18 @@ class LeetCodeClient {
     return details;
   }
 
+  async submissionStatus(id) {
+    const { submissionDetails: details } = await this.graphql(`query submissionStatus($submissionId: Int!) {
+      submissionDetails(submissionId: $submissionId) {
+        statusCode runtimeDisplay memoryDisplay totalCorrect totalTestcases compileError runtimeError
+        question { titleSlug } user { username }
+      }
+    }`, { submissionId: Number(validateSubmissionId(id)) });
+    if (!details || !['number', 'string'].includes(typeof details.statusCode) || !String(details.statusCode).trim() || !Number.isFinite(Number(details.statusCode)) || !details.user?.username) throw new ConnectionError('unavailable', 'The submission verdict is unavailable. Refresh submissions to retry.');
+    validateSlug(details.question?.titleSlug);
+    return { ...details, statusCode: Number(details.statusCode) };
+  }
+
   async start(kind, { problem, language, code, input }) {
     validateSlug(problem.titleSlug);
     if (!['run', 'submit'].includes(kind) || !problem.questionId || !/^[a-z0-9]+$/.test(language) || !code.trim()) throw new Error('A problem, language, and nonempty solution are required.');

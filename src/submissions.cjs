@@ -1,16 +1,20 @@
 'use strict';
-const { normalizeResult } = require('./judge.cjs');
+const { normalizeResult, STATUS } = require('./judge.cjs');
 
 function submissionRecord(item, owner) {
-  // LeetCode returns strings such as "Not Pending", not just booleans.
-  const flag = typeof item.isPending === 'string' ? item.isPending.trim().toLowerCase() : item.isPending;
-  const finished = Number.isFinite(Number(item.status)) && Number(item.status) >= 10;
-  const pending = !finished && [true, 1, 'true', '1', 'pending'].includes(flag);
+  // A final verdict outranks flags or cached "pending" state. Some list
+  // responses omit the status code, so also recognize the displayed verdict.
+  const display = typeof item.statusDisplay === 'string' ? item.statusDisplay.trim() : '';
+  const namedCode = Object.keys(STATUS).find(code => STATUS[code].toLowerCase() === display.toLowerCase());
+  const code = STATUS[Number(item.status)] ? Number(item.status) : namedCode ? Number(namedCode) : null;
+  const finalLabel = display && !/^(pending|judging|running|started|queued|queueing|in queue|waiting(?: for a result)?)\b/i.test(display);
+  const pending = code === null && !finalLabel;
   return {
     id: `submission:${item.id}`, remoteId: item.id, kind: 'submit', local: false, owner, slug: item.titleSlug, title: item.title,
     language: item.lang, createdAt: new Date(Number(item.timestamp) * 1000).toISOString(),
     status: pending ? 'pending' : 'complete',
-    result: pending ? undefined : normalizeResult({ status_code: item.status, status_msg: item.statusDisplay, status_runtime: item.runtime, status_memory: item.memory }, 'submit')
+    verdictState: pending ? 'fetching' : undefined,
+    result: pending ? undefined : normalizeResult({ status_code: code ?? item.status, status_msg: STATUS[code] || display, status_runtime: item.runtime, status_memory: item.memory }, 'submit')
   };
 }
 
@@ -29,7 +33,12 @@ function mergeSubmissions(local, remote) {
   const records = new Map();
   for (const record of [...remote, ...local]) {
     if (record.kind !== 'submit') continue;
-    records.set(record.remoteId ? `${record.owner}:${record.remoteId}` : record.id, record);
+    const key = record.remoteId ? `${record.owner}:${record.remoteId}` : record.id;
+    const server = records.get(key);
+    if (!server) { records.set(key, record); continue; }
+    const final = server.status === 'complete' ? server : record.status === 'complete' ? record : server;
+    const cached = Boolean(record.detailsLoaded && record.result?.verdict === final.result?.verdict);
+    records.set(key, { ...server, ...record, status: final.status, result: cached ? record.result : final.result, verdictState: final.verdictState, detailsLoaded: cached });
   }
   return [...records.values()].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 }

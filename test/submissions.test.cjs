@@ -30,6 +30,23 @@ test('submission history excludes runs and deduplicates local submissions agains
   assert.equal(history[1].code, 'saved code');
 });
 
+test('an explicit final display verdict survives a stale or missing list status code', () => {
+  for (const [statusDisplay, accepted] of [['Accepted', true], ['Wrong Answer', false], ['Time Limit Exceeded', false]]) {
+    const record = submissionRecord({ id: '42', timestamp: '1793057511', status: 0, statusDisplay, isPending: 'Pending' }, 'fixture-account');
+    assert.equal(record.status, 'complete'); assert.equal(record.result.verdict, statusDisplay); assert.equal(record.result.accepted, accepted);
+  }
+});
+
+test('cached pending records cannot overwrite a final verdict from a refreshed or overlapping page', () => {
+  const pending = submissionRecord({ id: '42', timestamp: '1793057511', status: 0, isPending: 'Pending' }, 'fixture-account');
+  const accepted = submissionRecord({ id: '42', timestamp: '1793057511', status: 10, statusDisplay: 'Accepted' }, 'fixture-account');
+  const [record] = mergeSubmissions([{ ...pending, code: 'preserved code' }], [accepted]);
+  assert.equal(record.status, 'complete'); assert.equal(record.result.verdict, 'Accepted'); assert.equal(record.code, 'preserved code');
+  const rejected = submissionRecord({ id: '42', timestamp: '1793057511', status: 11, statusDisplay: 'Wrong Answer' }, 'fixture-account');
+  const [rejudged] = mergeSubmissions([{ ...record, detailsLoaded: true }], [rejected]);
+  assert.equal(rejudged.result.verdict, 'Wrong Answer'); assert.equal(rejudged.detailsLoaded, false);
+});
+
 test('server details preserve zero percentiles and normalize actual runtime and memory distributions', () => {
   const result = submissionResult({ statusCode: 10, runtime: 3, runtimeDisplay: '3 ms', memory: 19200000, memoryDisplay: '19.2 MB', runtimePercentile: 0, memoryPercentile: '100', runtimeDistribution: '{"distribution":[["8",20],["3",80]]}', memoryDistribution: '{"distribution":[["19200",60],["20500",40]]}' });
   assert.equal(result.runtimePercentile, 0); assert.equal(result.memoryPercentile, 100);

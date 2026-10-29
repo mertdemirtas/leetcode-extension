@@ -100,11 +100,26 @@ class Controller {
       const page = await this.client.submissions(slug, { offset: append ? current.offset : 0, lastKey: append ? current.lastKey : null });
       if (!active()) return;
       const records = page.submissions.map(item => submissionRecord(item, owner));
+      let next = 0;
+      const unresolved = records.filter(record => record.status === 'pending');
+      await Promise.all(Array.from({ length: Math.min(4, unresolved.length) }, async () => {
+        while (next < unresolved.length && active()) {
+          const record = unresolved[next++];
+          try {
+            const details = await this.client.submissionStatus(record.remoteId);
+            if (!active()) return;
+            if (details.user.username !== owner || details.question.titleSlug !== slug) throw new Error('Submission account or problem mismatch.');
+            if (details.statusCode >= 10) Object.assign(record, { status: 'complete', result: submissionResult(details), verdictState: undefined });
+            else record.verdictState = 'judging';
+          } catch { record.verdictState = 'unavailable'; }
+        }
+      }));
+      if (!active()) return;
       const finished = new Map(records.filter(record => record.status === 'complete').map(record => [record.remoteId, record]));
       for (const local of this.journal.list()) {
         if (!active()) return;
         const remote = finished.get(local.remoteId);
-        if (remote && local.kind === 'submit' && local.owner === owner && local.slug === slug && local.status !== 'complete') {
+        if (remote && local.kind === 'submit' && local.owner === owner && local.slug === slug && (local.status !== 'complete' || local.result?.verdict !== remote.result?.verdict)) {
           await this.journal.update(local.id, { status: 'complete', result: remote.result, error: null, detailsLoaded: false });
         }
       }
@@ -128,7 +143,7 @@ class Controller {
       const details = await this.client.submissionDetails(record.remoteId);
       if (authVersion !== this.authVersion || owner !== this.connection.username) throw new Error('The connected account changed. Select the submission again.');
       if (details.user.username !== owner || details.question.titleSlug !== record.slug) throw new Error('This submission belongs to a different account or problem.');
-      if (!Number.isInteger(details.statusCode) || details.statusCode < 10) return record;
+      if (!Number.isInteger(Number(details.statusCode)) || Number(details.statusCode) < 10) return record;
       const current = this.journal.get(record.id) || record;
       const result = submissionResult(details);
       for (const name of ['runtimePercentile', 'memoryPercentile']) result[name] ??= current.result?.[name] ?? null;

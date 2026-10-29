@@ -130,4 +130,4 @@ class Judge {
   cancel() { this.cancelled = true; }
 }
 
-module.exports = { Judge, normalizeResult, exampleCases, validateCases };
+module.exports = { Judge, normalizeResult, exampleCases, validateCases, STATUS };

@@ -7,6 +7,7 @@ const os = require('node:os');
 const assert = require('node:assert/strict');
 const { pathToFileURL } = require('node:url');
 const fixture = require('../test/ui-fixture.cjs');
+const { submissionRecord } = require('../src/submissions.cjs');
 
 (async () => {
   const root = path.join(__dirname, '..');
@@ -87,6 +88,11 @@ const fixture = require('../test/ui-fixture.cjs');
     await page.screenshot({ path: path.join(output, 'accepted.png'), fullPage: true });
     await page.locator('[data-tab="history"]').click();
     assert.ok(await page.evaluate(() => window.messages.some(m => m.type === 'loadHistory')));
+    const past = [[10, 'Accepted'], [11, 'Wrong Answer'], [14, 'Time Limit Exceeded']].map(([status, statusDisplay], index) => submissionRecord({ id: String(index + 40), timestamp: '1793057511', status, statusDisplay, isPending: 'Not Pending' }, 'fixture-account'));
+    await emit({ ...state, history: past });
+    for (const verdict of ['Accepted', 'Wrong Answer', 'Time Limit Exceeded']) await page.locator('.history').getByText(verdict, { exact: true }).waitFor();
+    assert.equal(await page.getByText('Waiting for a result', { exact: true }).count(), 0);
+    await page.screenshot({ path: path.join(output, 'history.png'), fullPage: true });
     const runEntry = { ...state.record, id: 'excluded-test-run', kind: 'run', result: { verdict: 'All tests passed' } };
     await emit({ ...state, history: [runEntry, ...state.history], submissionHistory: { hasNext: true } });
     assert.equal(await page.locator('.history tbody tr').count(), 1);
