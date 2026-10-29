@@ -103,6 +103,20 @@ test('paging uses server-side search and does not prefetch the entire catalog', 
   assert.equal(requests[0].headers.Cookie, undefined);
 });
 
+test('difficulty and topic filters reach LeetCode and invalid filters never send a request', async () => {
+  const requests = [];
+  const client = new LeetCodeClient({ secrets: secrets(), fetchImpl: async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return response({ data: { problemsetQuestionList: { total: 0, questions: [] } } });
+  } });
+  await client.list({ search: 'sum', difficulty: 'Medium', tag: 'hash-table', skip: 25 });
+  assert.deepEqual(requests[0].variables, { skip: 25, limit: 25, filters: { searchKeywords: 'sum', difficulty: 'MEDIUM', tags: ['hash-table'] } });
+  assert.match(requests[0].query, /topicTags/);
+  await assert.rejects(client.list({ difficulty: 'medium' }));
+  await assert.rejects(client.list({ tag: '../invalid' }));
+  assert.equal(requests.length, 1);
+});
+
 test('problem details include sanitized-shape hints and deduplicated company tags from both server fields', async () => {
   let query;
   const client = new LeetCodeClient({ secrets: secrets(), fetchImpl: async (_url, options) => {

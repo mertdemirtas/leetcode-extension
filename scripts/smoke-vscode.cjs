@@ -62,16 +62,18 @@ const { pathToFileURL } = require('node:url');
       const account=await controller.client.connect(credentials);
       assert.equal((await controller.client.credentials()).session,'fixture-session');
       controller.connection={status:'connected',...account};
+      controller.browser={questions:[{...problem,status:'ac'}],total:1,search:'',loading:false,error:null};
       await v.commands.executeCommand('workbench.action.closeAuxiliaryBar').catch(()=>{});
       await v.commands.executeCommand('singularityLeetcode.open');
       await controller.openProblem('two-sum');
+      assert.ok((await v.commands.getCommands(true)).includes('singularityLeetcode.selectLanguage'));
       await controller.context.secrets.store('leetcode.host-smoke','fixture-only');
       assert.equal(await controller.context.secrets.get('leetcode.host-smoke'),'fixture-only');
       await controller.context.secrets.delete('leetcode.host-smoke');
-      await controller.execute('run');
+      await v.commands.executeCommand('singularityLeetcode.run');
       assert.equal(controller.state().record.result.verdict,'All tests passed');
       assert.equal(controller.state().record.remoteId,'runcode_1627219627.5662382_EI7iasnhLm');
-      await controller.execute('submit');
+      await v.commands.executeCommand('singularityLeetcode.submit');
       assert.equal(controller.state().record.result.verdict,'Accepted');
       await v.commands.executeCommand('singularityLeetcode.toggleResults');
       while(controller.views.get('results')?.visible)await new Promise(resolve=>setTimeout(resolve,10));
@@ -87,7 +89,9 @@ const { pathToFileURL } = require('node:url');
       assert.ok(controller.state().history.every(record=>record.kind==='submit'&&record.status==='complete'));
       await controller.message({type:'snapshot',id:'submission:1042839577'});
       assert.ok(v.workspace.textDocuments.some(document=>document.getText()==='# Website submission fixture'));
+      await controller.openProblem('two-sum');
       await controller.message({type:'selectAttempt',id:'submission:1042839577'});
+      await controller.showResults();
       fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({passed:true,posts,state:controller.state()}));
     }catch(error){fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({passed:false,error:error.stack}));}};
   `);
@@ -116,20 +120,45 @@ const { pathToFileURL } = require('node:url');
     const result=JSON.parse(await fs.readFile(report,'utf8'));assert.equal(result.passed,true,result.error);
     browser=await puppeteer.connect({browserURL:`http://127.0.0.1:${port}`,defaultViewport:null,protocolTimeout:20000});
     const page=await(await browser.waitForTarget(target=>target.type()==='page')).page();
-    let found;
-    const end=Date.now()+15000;
-    while(!found&&Date.now()<end){for(const frame of page.frames()){try{found=await frame.$('body[data-mode="results"] h2');if(found)break;}catch{}}if(!found)await pause(100);}
+    async function modeFrame(mode) {
+      const end=Date.now()+15000;
+      while(Date.now()<end){
+        for(const frame of page.frames()){
+          if(!frame.parentFrame())continue;
+          try{
+            const owners=[];
+            for(let current=frame;current.parentFrame();current=current.parentFrame())owners.unshift(await current.frameElement());
+            let visible=true;
+            for(const owner of owners)if(!await owner.isVisible()){visible=false;break;}
+            for(const owner of owners)await owner.dispose();
+            if(visible&&await frame.$(`body[data-mode="${mode}"]`))return frame;
+          }catch{}
+        }
+        await pause(100);
+      }
+      throw new Error('Missing visible '+mode+' webview');
+    }
+    const resultFrame=await modeFrame('results');
+    const found=await resultFrame.$('h2');
     assert.ok(found,'Results webview must render after restoration');
     const text=await found.evaluate(element=>element.textContent);assert.equal(text,'Accepted');
     const charts = await found.evaluate(element => element.ownerDocument.querySelectorAll('svg.distribution-chart').length);
     assert.equal(charts, 2);
-    let resultFrame;
-    for (const frame of page.frames()) { try { if (await frame.$('body[data-mode="results"]')) resultFrame=frame; } catch {} }
+    const descriptionFrame=await modeFrame('description');
+    assert.ok(descriptionFrame, 'The statement must remain beside the native solution editor');
+    assert.equal((await descriptionFrame.$$('.workbench-toolbar,[data-action="run"],[data-action="submit"]')).length,0);
+    await page.screenshot({path:path.join(source,'test-artifacts/vscode-before-native.png'),fullPage:true});
+    await page.screenshot({path:path.join(source,'test-artifacts/vscode-orbit.png'),fullPage:true});
     await resultFrame.click('[data-tab="history"]');
     await resultFrame.waitForFunction(() => document.querySelectorAll('.history tbody tr').length===4);
     const verdicts=await resultFrame.$$eval('.history tbody tr td:first-child button',nodes=>nodes.map(node=>node.textContent).sort());
     assert.deepEqual(verdicts,['Accepted','Accepted','Time Limit Exceeded','Wrong Answer']);
     await page.screenshot({path:path.join(source,'test-artifacts/vscode-history.png'),fullPage:true});
+    await resultFrame.click('[data-action="submissionPerformance"][data-id="submission:1042839577"]');
+    await pause(500);
+    await resultFrame.waitForFunction(()=>document.querySelectorAll('.submission-performance svg.distribution-chart').length===2&&!document.querySelector('.performance-status[role="status"]'),{polling:100,timeout:10000});
+    assert.equal(await resultFrame.$eval('[data-tab="history"]',element=>element.getAttribute('aria-selected')),'true');
+    await page.screenshot({path:path.join(source,'test-artifacts/vscode-history-performance.png'),fullPage:true});
     await resultFrame.click('[data-action="selectAttempt"][data-id="submission:1042839577"]');
     await resultFrame.waitForSelector('svg.distribution-chart');
 

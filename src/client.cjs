@@ -126,13 +126,19 @@ class LeetCodeClient {
     return { username: userStatus.username, premium: Boolean(userStatus.isPremium) };
   }
 
-  async list({ search = '', skip = 0, limit = 25 } = {}) {
+  async list({ search = '', skip = 0, limit = 25, difficulty = '', tag = null } = {}) {
+    if (!['', 'Easy', 'Medium', 'Hard'].includes(difficulty)) throw new Error('Invalid problem difficulty.');
+    if (tag !== null) validateSlug(tag);
+    const filters = {};
+    if (search.trim()) filters.searchKeywords = search.trim();
+    if (difficulty) filters.difficulty = difficulty.toUpperCase();
+    if (tag) filters.tags = [tag];
     const saved = await this.secrets.get(SECRET_KEY);
     const data = await this.graphql(`query problemsetQuestionList($skip: Int, $limit: Int, $filters: QuestionListFilterInput) {
       problemsetQuestionList: questionList(categorySlug: "", skip: $skip, limit: $limit, filters: $filters) {
-        total: totalNum questions: data { questionFrontendId title titleSlug difficulty isPaidOnly status }
+        total: totalNum questions: data { questionFrontendId title titleSlug difficulty isPaidOnly status topicTags { name slug } }
       }
-    }`, { skip, limit, filters: search.trim() ? { searchKeywords: search.trim() } : {} }, { authenticated: Boolean(saved) });
+    }`, { skip, limit, filters }, { authenticated: Boolean(saved) });
     const list = data.problemsetQuestionList;
     if (!Array.isArray(list?.questions) || !Number.isFinite(list.total)) throw new ConnectionError('protocol', 'The problem list format has changed.');
     return { total: list.total, questions: list.questions.map(q => ({ ...q, titleSlug: validateSlug(q.titleSlug) })) };

@@ -117,10 +117,13 @@ test('the default-language setting is a dropdown covering every supported file t
   assert.ok(manifest.activationEvents.includes('onStartupFinished'));
   assert.equal(manifest.contributes.menus['view/title'].length, 1);
   assert.equal(manifest.contributes.menus['view/title'][0].command, 'singularityLeetcode.toggleResults');
+  const nativeActions = manifest.contributes.menus['editor/title'];
+  assert.deepEqual(nativeActions.map(item => item.command), ['selectLanguage','run','submit','toggleResults'].map(command => 'singularityLeetcode.' + command));
+  assert.ok(nativeActions.every(item => item.when.includes('activeWebviewPanelId == singularityLeetcode.description')));
 });
 
 test('history loads website submissions, excludes test runs, and opens server code without exposing it to webviews', async t => {
-  const { controller, problem, api } = await fixture(t);
+  const { controller, problem, api, calls } = await fixture(t);
   await controller.openProblem('two-sum');
   controller.connection = { status: 'connected', username: 'fixture-account' };
   const options = { problem, owner: 'fixture-account', language: 'python3', code: 'local submitted code', cases: [], fileUri: 'file:///tmp/two-sum.py' };
@@ -142,6 +145,7 @@ test('history loads website submissions, excludes test runs, and opens server co
   api.workspace.openTextDocument = async value => { opened = value; return {}; };
   await controller.message({ type: 'snapshot', id: 'submission:43' });
   assert.equal(opened.content, 'exact website submission'); assert.equal(opened.language, 'python');
+  assert.equal(calls.filter(([name])=>name==='editor').at(-1)[1].viewColumn,2);
   assert.ok(!JSON.stringify(controller.state()).includes('exact website submission'));
   await controller.message({ type: 'selectAttempt', id: 'submission:43' });
   assert.equal(controller.state().record.result.runtimePercentile, 0);
@@ -149,6 +153,37 @@ test('history loads website submissions, excludes test runs, and opens server co
   controller.connection = { status: 'connected', username: 'different-account' };
   assert.equal(controller.state().history.length, 0);
   await assert.rejects(controller.message({ type: 'snapshot', id: 'submission:43' }));
+});
+
+test('accepted history performance stays inline, uses that submission, and never exposes source or stale-account replies', async t => {
+  const { controller, problem } = await fixture(t);
+  await controller.openProblem('two-sum'); controller.connection = { status: 'connected', username: 'fixture-account' };
+  controller.client.submissions = async () => ({ submissions: ['42','43'].map(id => ({id, titleSlug:'two-sum', timestamp:'1793057511', status:id==='42'?10:11})), hasNext:false });
+  await controller.loadHistory();
+  const latest = await controller.journal.create({ kind:'run', problem, owner:'fixture-account', language:'python3', code:'latest local code', cases:[], fileUri:'file:///tmp/two-sum.py' });
+  controller.displayed = latest.id;
+  const messages = [];
+  controller.views.set('results', {webview:{postMessage:async message => messages.push(message)}});
+  let calls = 0;
+  const details = { code:'# private historical code', statusCode:10, runtime:8, runtimeDisplay:'8 ms', runtimePercentile:0, runtimeDistribution:'{"distribution":[[8,100]]}', memory:19900000, memoryDisplay:'19.9 MB', memoryPercentile:75, memoryDistribution:'{"distribution":[[19900,100]]}', user:{username:'fixture-account'}, question:{titleSlug:'two-sum'} };
+  controller.client.submissionDetails = async id => { calls++; assert.equal(id,'42'); return details; };
+  await controller.message({type:'submissionPerformance',id:'submission:42',request:7});
+  const response = messages.find(message => message.type==='submissionPerformance' && message.request===7);
+  assert.equal(response.result.runtime,'8 ms'); assert.equal(response.result.runtimePercentile,0);
+  assert.equal(response.result.memory,'19.9 MB'); assert.equal(response.result.runtimeDistribution[0][0],8);
+  assert.equal(controller.displayed,latest.id);
+  assert.equal(controller.state().record.id,latest.id);
+  assert.ok(!JSON.stringify(messages).includes('# private historical code'));
+  await controller.message({type:'submissionPerformance',id:'submission:43',request:8});
+  assert.match(messages.find(message=>message.request===8).error,/accepted submission/);
+  assert.equal(calls,1);
+  controller.submissions.records.find(record=>record.remoteId==='42').detailsLoaded=false;
+  let release;
+  controller.client.submissionDetails=()=>new Promise(resolve=>{release=resolve;});
+  const loading=controller.message({type:'submissionPerformance',id:'submission:42',request:9});
+  controller.authVersion++; controller.connection={status:'connected',username:'another-account'};
+  release(details); await loading;
+  assert.ok(!messages.some(message=>message.type==='submissionPerformance'&&message.request===9));
 });
 
 test('stale server history and code responses cannot cross problem or account changes', async t => {
@@ -230,14 +265,15 @@ test('a saved session restores without prompting, and transient failures retain 
   assert.ok(await context.secrets.get('leetcode.session.v1'));
 });
 
-test('VS Code opens the source before creating a second description group', async t => {
+test('VS Code opens the Orbit statement on the left and the native solution on the right', async t => {
   const { controller, calls, api } = await fixture(t);
   api.env.appName = 'Visual Studio Code';
   await controller.openProblem('two-sum');
   const editorIndex = calls.findIndex(([name]) => name === 'editor');
   const panelIndex = calls.findIndex(([name]) => name === 'panel');
-  assert.ok(editorIndex < panelIndex, 'An empty VS Code window must get its first editor before the description requests a second group');
-  assert.equal(calls[panelIndex][1].viewColumn, 2);
+  assert.ok(panelIndex >= 0 && editorIndex > panelIndex, 'The statement creates the first group before the source requests a second group');
+  assert.equal(calls[panelIndex][1].viewColumn, 1);
+  assert.equal(calls[editorIndex][1].viewColumn, 2);
   assert.equal(calls[panelIndex][1].preserveFocus, true);
 });
 
@@ -247,6 +283,71 @@ test('Singularity reuses the description without reattaching its first column', 
   assert.equal(calls.filter(([name]) => name === 'reveal').length, 0);
   await controller.openProblem('two-sum');
   assert.deepEqual(calls.find(([name]) => name === 'reveal'), ['reveal', undefined, true]);
+});
+
+test('problem filters persist across server pagination and stale searches cannot replace them', async t => {
+  const { controller } = await fixture(t);
+  const requests = [];
+  let release;
+  controller.client.list = async options => {
+    requests.push(options);
+    if (options.search === 'stale') return new Promise(resolve => { release = resolve; });
+    return { questions: [{ titleSlug: 'two-sum' }], total: 30 };
+  };
+  const filters = { difficulty: 'Medium', tag: { name: 'Array', slug: 'array' } };
+  const stale = controller.search('stale');
+  await controller.message({ type: 'search', search: 'sum', filters });
+  await controller.message({ type: 'more' });
+  release({ questions: [], total: 0 }); await stale;
+  assert.equal(controller.state().browser.questions.length, 2);
+  assert.equal(controller.state().browser.search, 'sum');
+  assert.equal(controller.state().browser.filters.tag.slug, 'array');
+  assert.equal(requests[2].skip, 1); assert.equal(requests[2].difficulty, 'Medium'); assert.equal(requests[2].tag, 'array');
+  await controller.message({ type: 'search', search: '', filters: { difficulty: '', tag: null } });
+  assert.equal(controller.state().browser.questions.length, 1);
+  await assert.rejects(controller.message({ type: 'search', search: '', filters: { difficulty: 'Invalid' } }));
+});
+
+test('favorites survive restart and contain only opened problem identifiers', async t => {
+  const { controller, context, Controller } = await fixture(t);
+  await assert.rejects(controller.message({ type: 'toggleFavorite', slug: 'not-opened' }));
+  await controller.openProblem('two-sum');
+  await controller.message({ type: 'toggleFavorite', slug: 'two-sum' });
+  assert.deepEqual(context.workspaceState.get('state.v1').favorites, ['two-sum']);
+  const restored = new Controller(context, controller.journal); t.after(() => restored.dispose());
+  assert.equal(restored.state().favorites[0], 'two-sum');
+  assert.equal(restored.state().knownProblems[0].titleSlug, 'two-sum');
+  assert.ok(!JSON.stringify(restored.state().knownProblems).includes('class Solution'));
+  await restored.message({ type: 'toggleFavorite', slug: 'two-sum' });
+  assert.equal(context.workspaceState.get('state.v1').favorites.length, 0);
+});
+
+test('native language selection preserves the previous solution and rejects a stale problem choice', async t => {
+  const { controller, problem, api, config } = await fixture(t);
+  problem.codeSnippets.push({ lang: 'C++', langSlug: 'cpp', code: '// C++ starter' });
+  await controller.openProblem('two-sum');
+  await fs.writeFile(path.join(config.savePath, 'two-sum.py'), '# preserved Python work');
+  api.window.showQuickPick = async choices => choices.find(choice => choice.slug === 'cpp');
+  await controller.selectLanguage();
+  assert.equal(controller.state().language, 'cpp');
+  assert.equal(await fs.readFile(path.join(config.savePath, 'two-sum.py'), 'utf8'), '# preserved Python work');
+  assert.equal(await fs.readFile(path.join(config.savePath, 'two-sum.cpp'), 'utf8'), '// C++ starter\n');
+  let resolve;
+  api.window.showQuickPick = () => new Promise(done => { resolve = done; });
+  const selecting = controller.selectLanguage();
+  controller.saved.selected = 'other-problem'; resolve({ slug: 'python3' });
+  await assert.rejects(selecting, /problem changed/);
+});
+
+test('moving focus to a panel retains native solution actions; an unrelated editor clears them', async t => {
+  const { controller, calls, api } = await fixture(t);
+  await controller.openProblem('two-sum');
+  await controller.editorChanged(undefined);
+  let contexts = calls.filter(call => call[0] === 'setContext' && call[1] === 'singularityLeetcode.solutionActive');
+  assert.equal(contexts.at(-1)[2], true);
+  await controller.editorChanged({ document: { uri: api.Uri.file('/tmp/unrelated.py') } });
+  contexts = calls.filter(call => call[0] === 'setContext' && call[1] === 'singularityLeetcode.solutionActive');
+  assert.equal(contexts.at(-1)[2], false);
 });
 
 test('switching selected problems during save cannot submit code to the wrong problem', async t => {

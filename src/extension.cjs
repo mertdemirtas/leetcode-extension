@@ -29,9 +29,10 @@ class Controller {
     this.journal = journal;
     this.saved = context.workspaceState.get('state.v1') || { documents: {}, problems: {}, cases: {}, selected: null, language: null, activeUri: null, recent: [] };
     delete this.saved.directories;
+    this.saved.favorites ||= [];
     this.client = new LeetCodeClient({ secrets: context.secrets, timeout: this.config('requestTimeout', 20000) });
     this.connection = { status: 'disconnected', username: null, error: null };
-    this.browser = { questions: [], total: 0, search: '', loading: false, error: null };
+    this.browser = { questions: [], total: 0, search: '', filters: { difficulty: '', tag: null }, loading: false, error: null };
     this.views = new Map();
     this.displayed = null;
     this.currentHash = null;
@@ -77,6 +78,8 @@ class Controller {
       record: summary(record), busy: this.judge.busy || Boolean(this.executing) || this.connecting || Boolean(this.restoring), connectionBusy: this.connecting || Boolean(this.restoring), authorizing: Boolean(this.browserAuth?.pending),
       changedSinceRun: Boolean(record?.snapshot && this.currentHash && record.snapshot !== this.currentHash),
       resultsVisible: Boolean(this.views.get('results')?.visible),
+      favorites: this.saved.favorites,
+      knownProblems: Object.values(this.saved.problems).map(p => ({ titleSlug: p.titleSlug, title: p.title, questionFrontendId: p.questionFrontendId, difficulty: p.difficulty, topicTags: p.topicTags || [], companies: p.companies || [], isPaidOnly: p.isPaidOnly })),
       recent: this.saved.recent.map(slug => this.saved.problems[slug]).filter(Boolean).map(p => ({ titleSlug: p.titleSlug, title: p.title, questionFrontendId: p.questionFrontendId, difficulty: p.difficulty })),
       error: this.error || null
     };
@@ -259,16 +262,19 @@ class Controller {
     this.publish();
   }
 
-  async search(search = '', append = false) {
+  async search(search = '', append = false, filters = this.browser.filters || { difficulty: '', tag: null }) {
     if (typeof search !== 'string' || search.length > 150) throw new Error('Search text is too long.');
+    if (!filters || !['', 'Easy', 'Medium', 'Hard'].includes(filters.difficulty || '') || (filters.tag !== null && filters.tag !== undefined && (typeof filters.tag.name !== 'string' || filters.tag.name.length > 100))) throw new Error('Invalid problem filters.');
+    if (filters.tag) validateSlug(filters.tag.slug);
+    filters = { difficulty: filters.difficulty || '', tag: filters.tag ? { name: filters.tag.name, slug: filters.tag.slug } : null };
     const generation = ++this.searchGeneration;
     const skip = append ? this.browser.questions.length : 0;
-    this.browser = { ...this.browser, search, loading: true, error: null };
+    this.browser = { ...this.browser, search, filters, loading: true, error: null };
     this.publish();
     try {
-      const page = await this.client.list({ search, skip });
+      const page = await this.client.list({ search, skip, difficulty: filters.difficulty, tag: filters.tag?.slug || null });
       if (generation !== this.searchGeneration) return;
-      this.browser = { questions: append ? [...this.browser.questions, ...page.questions] : page.questions, total: page.total, search, loading: false, error: null };
+      this.browser = { questions: append ? [...this.browser.questions, ...page.questions] : page.questions, total: page.total, search, filters, loading: false, error: null };
     } catch (error) {
       if (generation === this.searchGeneration) this.browser = { ...this.browser, loading: false, error: error.message };
       throw error;
@@ -312,14 +318,22 @@ class Controller {
       await this.persist();
       const document = await vscode.workspace.openTextDocument(uri);
       this.currentHash = hash(document.getText());
-      const ownHost = /singularity|theia/i.test(vscode.env.appName);
-      if (ownHost) await this.showDescription();
-      await vscode.window.showTextDocument(document, { viewColumn: ownHost ? vscode.ViewColumn.Two : vscode.ViewColumn.One, preview: false });
-      if (!ownHost) await this.showDescription();
       await vscode.commands.executeCommand('setContext', `${PREFIX}.solutionActive`, true);
+      await this.showDescription();
+      await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Two, preview: false });
       await this.showResults(false);
       this.publish();
     } finally { this.opening = false; }
+  }
+
+  async selectLanguage() {
+    const problem = this.problem();
+    if (!problem) throw new Error('Open a LeetCode problem before choosing its language.');
+    if (this.judge.busy || this.executing || this.opening) throw new Error('Wait for the current request before changing languages.');
+    const choice = await vscode.window.showQuickPick(problem.codeSnippets.map(snippet => ({ label: snippet.lang, description: snippet.langSlug === this.saved.language ? 'Current language' : '', slug: snippet.langSlug })), { title: `Language for ${problem.title}`, placeHolder: 'Choose a language supported by this problem' });
+    if (!choice || choice.slug === this.saved.language) return;
+    if (this.saved.selected !== problem.titleSlug) throw new Error('The selected problem changed. Choose its language again.');
+    await this.openProblem(problem.titleSlug, choice.slug);
   }
 
   async showDescription() {
@@ -330,14 +344,14 @@ class Controller {
         let resolve;
         this.descriptionReady = { promise: new Promise(done => { resolve = done; }), resolve: () => resolve() };
       }
-      this.description = vscode.window.createWebviewPanel(`${PREFIX}.description`, 'LeetCode problem', { viewColumn: ownHost ? vscode.ViewColumn.One : vscode.ViewColumn.Two, preserveFocus: true }, { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')], retainContextWhenHidden: true });
+      this.description = vscode.window.createWebviewPanel(`${PREFIX}.description`, 'LeetCode problem', { viewColumn: vscode.ViewColumn.One, preserveFocus: true }, { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')], retainContextWhenHidden: true });
       this.attach('description', this.description);
       this.description.onDidDispose(() => { this.description = null; this.views.delete('description'); });
     }
     this.description.title = `${this.problem().questionFrontendId}. ${this.problem().title}`;
     // Creation already reveals the panel. Theia can try to reattach a visible
     // panel to itself if its first column is passed to reveal() again.
-    if (!created) this.description.reveal(ownHost ? undefined : vscode.ViewColumn.Two, true);
+    if (!created) this.description.reveal(ownHost ? undefined : vscode.ViewColumn.One, true);
     if (ownHost && this.descriptionReady) {
       let timer;
       try {
@@ -430,6 +444,8 @@ class Controller {
   }
 
   async editorChanged(editor) {
+    // A webview or panel taking focus does not replace the selected solution.
+    if (!editor) return;
     const uri = editor?.document.uri.toString();
     const mapped = uri && this.saved.documents[uri];
     await vscode.commands.executeCommand('setContext', `${PREFIX}.solutionActive`, Boolean(mapped));
@@ -451,7 +467,14 @@ class Controller {
       case 'refresh': await this.refresh(); break;
       case 'exit': await this.exit(); break;
       case 'chooseSavePath': await this.chooseSavePath(); break;
-      case 'search': await this.search(message.search); break;
+      case 'settings': await vscode.commands.executeCommand('workbench.action.openSettings', 'singularityLeetcode'); break;
+      case 'toggleFavorite': {
+        validateSlug(message.slug);
+        if (!this.saved.problems[message.slug]) throw new Error('Open the problem before saving it as a favorite.');
+        this.saved.favorites = this.saved.favorites.includes(message.slug) ? this.saved.favorites.filter(slug => slug !== message.slug) : [...this.saved.favorites, message.slug];
+        await this.persist(); this.publish(); break;
+      }
+      case 'search': await this.search(message.search, false, message.filters || this.browser.filters); break;
       case 'more': await this.search(this.browser.search, true); break;
       case 'daily': await this.openProblem(await this.client.daily()); break;
       case 'openProblem': await this.openProblem(message.slug, message.language); break;
@@ -461,6 +484,19 @@ class Controller {
       case 'toggleResults': case 'minimize': await this.toggleResults(); break;
       case 'loadHistory': await this.loadHistory(); break;
       case 'moreHistory': await this.loadHistory(true); break;
+      case 'submissionPerformance': {
+        const slug = this.saved.selected, owner = this.connection.username, authVersion = this.authVersion;
+        const response = { type: 'submissionPerformance', id: message.id, request: message.request, slug, owner };
+        try {
+          const record = this.recordById(message.id);
+          if (!record || record.kind !== 'submit' || record.slug !== slug || record.owner !== owner || !record.result?.accepted) throw new Error('Choose an accepted submission from the connected account.');
+          const updated = await this.enrichSubmission(record);
+          if (!updated?.result?.accepted) throw new Error(`This submission is now ${updated?.result?.verdict || 'unavailable'}. Refresh submissions to update its verdict.`);
+          response.result = { ...updated.result, raw: undefined };
+        } catch (error) { response.error = error.message || 'Submission performance is unavailable.'; }
+        if (authVersion === this.authVersion && slug === this.saved.selected && owner === this.connection.username) await this.views.get('results')?.webview.postMessage(response);
+        break;
+      }
       case 'selectAttempt': {
         const record = this.recordById(message.id);
         if (!record || record.slug !== this.saved.selected || (this.connection.username && record.owner !== this.connection.username)) throw new Error('This submission belongs to a different account or problem.');
@@ -481,7 +517,7 @@ class Controller {
         if (typeof record?.code !== 'string') throw new Error('Connect or refresh your account to retrieve the submitted code.');
         if (record.slug !== this.saved.selected) throw new Error('The selected problem changed. Select the submission again.');
         const document = await vscode.workspace.openTextDocument({ content: record.code, language: ['python3', 'pythondata'].includes(record.language) ? 'python' : record.language === 'golang' ? 'go' : record.language === 'react' ? 'javascriptreact' : record.language === 'vanillajs' ? 'javascript' : record.language });
-        await vscode.window.showTextDocument(document, { preview: false }); break;
+        await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Two, preview: false }); break;
       }
       case 'markReviewed': {
         const record = this.journal.get(message.id);
@@ -513,6 +549,7 @@ async function activate(context) {
   command('connect', () => controller.connect()); command('refresh', () => controller.refresh()); command('exit', () => controller.exit());
   command('chooseSavePath', () => controller.chooseSavePath());
   command('run', () => controller.execute('run')); command('submit', () => controller.execute('submit'));
+  command('selectLanguage', () => controller.selectLanguage());
   command('showResults', () => controller.showResults());
   command('toggleResults', () => controller.toggleResults()); command('minimizeResults', () => controller.toggleResults());
   for (const mode of ['problems', 'results']) context.subscriptions.push(vscode.window.registerWebviewViewProvider(`${PREFIX}.${mode}`, { resolveWebviewView: view => controller.attach(mode, view) }, { webviewOptions: { retainContextWhenHidden: true } }));

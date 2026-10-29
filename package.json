@@ -2,7 +2,7 @@
   "name": "singularity-leetcode",
   "displayName": "LeetCode for Singularity and VS Code",
   "description": "Solve, run, and submit LeetCode problems with saved drafts and recoverable judge results.",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "publisher": "mertdemirtas",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/mertdemirtas/leetcode-extension.git" },
@@ -33,6 +33,7 @@
       { "command": "singularityLeetcode.chooseSavePath", "title": "Choose Problem Save Folder", "category": "LeetCode", "icon": "$(folder-opened)" },
       { "command": "singularityLeetcode.run", "title": "Run Test Cases", "category": "LeetCode", "icon": "$(play)" },
       { "command": "singularityLeetcode.submit", "title": "Submit Solution", "category": "LeetCode", "icon": "$(cloud-upload)" },
+      { "command": "singularityLeetcode.selectLanguage", "title": "Change Solution Language", "category": "LeetCode", "icon": "$(code)" },
       { "command": "singularityLeetcode.showResults", "title": "Show Results", "category": "LeetCode", "icon": "$(layout-panel)" },
       { "command": "singularityLeetcode.toggleResults", "title": "Toggle Tests & Results", "category": "LeetCode", "icon": "$(layout-panel)" }
     ],
@@ -46,9 +47,10 @@
     },
     "menus": {
       "editor/title": [
-        { "command": "singularityLeetcode.run", "when": "singularityLeetcode.solutionActive", "group": "navigation@1" },
-        { "command": "singularityLeetcode.submit", "when": "singularityLeetcode.solutionActive", "group": "navigation@2" },
-        { "command": "singularityLeetcode.toggleResults", "when": "singularityLeetcode.solutionActive", "group": "navigation@3" }
+        { "command": "singularityLeetcode.selectLanguage", "when": "singularityLeetcode.solutionActive || activeWebviewPanelId == singularityLeetcode.description", "group": "1_leetcode@1" },
+        { "command": "singularityLeetcode.run", "when": "singularityLeetcode.solutionActive || activeWebviewPanelId == singularityLeetcode.description", "group": "navigation@2" },
+        { "command": "singularityLeetcode.submit", "when": "singularityLeetcode.solutionActive || activeWebviewPanelId == singularityLeetcode.description", "group": "navigation@3" },
+        { "command": "singularityLeetcode.toggleResults", "when": "singularityLeetcode.solutionActive || activeWebviewPanelId == singularityLeetcode.description", "group": "1_leetcode@2" }
       ],
       "view/title": [{ "command": "singularityLeetcode.toggleResults", "when": "view == singularityLeetcode.results", "group": "navigation" }]
     },

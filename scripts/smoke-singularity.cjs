@@ -137,7 +137,25 @@ const { pathToFileURL } = require('node:url');
       }, `${mode} webview`, 30000);
     }
     const sidebar = await modeFrame('problems');
-    assert.equal((await sidebar.$$('.side-controls button')).length, 3);
+    assert.equal((await sidebar.$$('.side-controls button')).length, 5);
+    const description = await modeFrame('description');
+    assert.equal((await description.$$('.workbench-toolbar,[data-action="run"],[data-action="submit"]')).length, 0);
+    async function nativeAction(label) {
+      const visible = async selector => {
+        const handle = await page.evaluateHandle(({selector,label}) => [...document.querySelectorAll(selector)].find(node => (node.getAttribute('title') || node.textContent || '').includes(label) && node.getBoundingClientRect().width > 0), {selector,label});
+        const element = handle.asElement(); if (element) return element;
+        await handle.dispose();
+      };
+      let handle = await visible('[title]');
+      if (!handle) {
+        const more = await until(async () => {
+          for (const node of await page.$$('[title="More Actions..."]')) if ((await node.boundingBox())?.width) return node;
+        }, 'native More Actions');
+        await more.click(); await more.dispose();
+        handle = await until(() => visible('.lm-Menu-itemLabel,.p-Menu-itemLabel,[role="menuitem"]'), `native ${label} menu action`, 15000);
+      }
+      await handle.click(); await handle.dispose();
+    }
     const result = await modeFrame('results');
     assert.equal((await result.$$('[data-action="minimize"],[data-action="toggleResults"]')).length, 0);
     await command('toggle');
@@ -149,14 +167,18 @@ const { pathToFileURL } = require('node:url');
     assert.equal((await restored.$$('textarea')).length, 1);
     assert.equal((await restored.$$('[data-field="expected"]')).length, 0);
     await restored.$eval('[data-field="input"]', element => { element.value = '[3,3]\n6'; element.dispatchEvent(new Event('input', { bubbles: true })); });
-    await sidebar.click('[data-action="run"]');
+    await nativeAction('Change Solution Language');
+    await page.waitForSelector('.quick-input-widget', { visible: true });
+    await page.keyboard.press('Escape');
+    await nativeAction('Run Test Cases');
     await until(async () => { const record = (await command('state')).state.record; return record?.kind === 'run' && record?.status === 'complete'; }, 'edited test case run');
     assert.equal((await command('state')).state.record.result.cases[0].input, '[3,3]\n6');
     assert.equal((await command('state')).state.record.remoteId, 'runcode_1627219627.5662382_EI7iasnhLm');
-    await sidebar.click('[data-action="submit"]');
+    await nativeAction('Submit Solution');
     await until(async () => (await command('state')).state.record?.result?.accepted, 'accepted judge fixture');
     const current = await command('state'); assert.equal(current.posts, 2);
     assert.equal(current.state.record.result.verdict, 'Accepted');
+    await page.screenshot({ path: path.join(source, 'test-artifacts/singularity-orbit.png'), fullPage: true });
     await command('toggle');
     await until(async () => !(await command('state')).state.resultsVisible, 'hide results with toggle');
     await command('toggle');
@@ -170,6 +192,13 @@ const { pathToFileURL } = require('node:url');
     const verdicts = await historyFrame.$$eval('.history tbody tr td:first-child button', nodes => nodes.map(node => node.textContent).sort());
     assert.deepEqual(verdicts, ['Accepted','Accepted','Time Limit Exceeded','Wrong Answer']);
     await page.screenshot({path:path.join(source,'test-artifacts/singularity-history.png'),fullPage:true});
+    const selectedBefore = (await command('state')).state.record.id;
+    await historyFrame.click('[data-action="submissionPerformance"][data-id="submission:1042839577"]');
+    await historyFrame.waitForFunction(() => document.querySelectorAll('.submission-performance svg.distribution-chart').length===2 && !document.querySelector('.performance-status[role="status"]'));
+    assert.equal(await historyFrame.$eval('[data-tab="history"]',element=>element.getAttribute('aria-selected')),'true');
+    assert.equal((await command('state')).state.record.id,selectedBefore);
+    assert.equal((await command('state')).posts,2);
+    await page.screenshot({path:path.join(source,'test-artifacts/singularity-history-performance.png'),fullPage:true});
     await command('snapshot'); await command('select');
     const finalResults = await modeFrame('results');
     await finalResults.waitForSelector('svg.distribution-chart');
