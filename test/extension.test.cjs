@@ -43,6 +43,7 @@ async function fixture(t) {
   t.after(() => controller.dispose());
   const problem = { detailsVersion: 1, hints: ['Use a hash map.'], companies: [], companiesAvailable: false, titleSlug: 'two-sum', questionId: '1', questionFrontendId: '1', title: 'Two Sum', difficulty: 'Easy', content: '<p>Find two numbers.</p>', sampleTestCase: '[2,7]\n9', metaData: '{"params":[{},{}]}', topicTags: [], codeSnippets: [{ lang: 'Python3', langSlug: 'python3', code: 'class Solution: pass' }] };
   controller.client.problem = async () => problem;
+  controller.client.catalog = async () => ({ tags: [], companies: [] });
   return { controller, config, calls, api, directory, problem, html: module.exports.html, context, Controller: module.exports.Controller };
 }
 
@@ -451,4 +452,64 @@ test('webviews use a nonce CSP and never receive session cookies', async t => {
   await assert.rejects(controller.message({ type: 'openExternal', url: 'https://evil.example/collect' }), /Only LeetCode links/);
   await controller.message({ type: 'openExternal', url: 'https://leetcode.com/problems/two-sum/' });
   assert.equal(api.env.appName, 'Singularity');
+});
+
+
+test('catalog loads once, retries failures, and refresh reloads the active server filters', async t => {
+  const { controller } = await fixture(t); let catalogs = 0, searches = [];
+  controller.client.catalog = async () => { catalogs++; return { tags: [{ name: 'Graph Theory', slug: 'graph' }], companies: [{ name: 'Google', slug: 'google' }] }; };
+  await controller.message({ type: 'loadCatalog' }); await controller.message({ type: 'loadCatalog' });
+  assert.equal(catalogs, 1); assert.equal(controller.state().catalog.tags[0].slug, 'graph');
+  controller.browser.filters = { difficulty: 'Easy', tag: null, company: { name: 'Google', slug: 'google' } };
+  controller.client.account = async () => ({ username: 'fixture-account' });
+  controller.client.list = async options => { searches.push(options); return { total: 1, questions: [{ titleSlug: 'not-cached' }] }; };
+  await controller.refresh(false);
+  assert.equal(searches[0].company, 'google'); assert.equal(searches[0].difficulty, 'Easy'); assert.equal(catalogs, 2);
+  assert.equal(controller.state().browser.questions[0].titleSlug, 'not-cached');
+  controller.client.catalog = async () => { throw new Error('Unavailable catalog'); };
+  await controller.message({ type: 'loadCatalog', force: true });
+  assert.equal(controller.state().catalog.error, 'Unavailable catalog');
+  assert.equal(controller.state().catalog.tags[0].slug, 'graph');
+});
+
+test('suggestions use typed text or an exact topic, preserve the main list, and ignore stale responses', async t => {
+  const { controller } = await fixture(t); const messages = [], requests = []; let release;
+  controller.views.set('problems', { webview: { postMessage: async message => messages.push(message) } });
+  controller.catalog.tags = [{ name: 'Dynamic Programming', slug: 'dynamic-programming' }];
+  controller.browser.questions = [{ titleSlug: 'two-sum' }];
+  controller.client.list = async options => {
+    requests.push(options);
+    if (options.search === 'stale') return new Promise(resolve => { release = resolve; });
+    return { total: 1, questions: [{ titleSlug: 'climbing-stairs' }] };
+  };
+  const stale = controller.message({ type: 'suggest', search: 'stale', request: 1 });
+  await controller.message({ type: 'suggest', search: 'dynamic programming', request: 2, filters: { difficulty: 'Easy' } });
+  release({ total: 1, questions: [{ titleSlug: 'stale-result' }] }); await stale;
+  assert.equal(messages.length, 1); assert.equal(messages[0].topic, 'Dynamic Programming');
+  assert.equal(messages[0].request, 2); assert.equal(messages[0].questions[0].titleSlug, 'climbing-stairs');
+  assert.equal(requests[1].tag, 'dynamic-programming'); assert.equal(requests[1].search, ''); assert.equal(requests[1].limit, 6);
+  assert.equal(controller.browser.questions[0].titleSlug, 'two-sum');
+  await assert.rejects(controller.message({ type: 'suggest', search: 'x', request: -1 }));
+  await assert.rejects(controller.message({ type: 'suggest', search: 'x', request: 3, filters: { company: { name: 'Bad', slug: '../bad' } } }));
+  controller.views.delete('problems');
+});
+
+test('search and suggestion failures stay local and a sign-out discards in-flight account results', async t => {
+  const { controller } = await fixture(t); const messages = []; let releaseSearch, releaseSuggest;
+  controller.views.set('problems', { webview: { postMessage: async message => messages.push(message) } });
+  controller.client.list = async options => {
+    if (options.search === 'late-search') return new Promise(resolve => { releaseSearch = resolve; });
+    if (options.search === 'late-suggest') return new Promise(resolve => { releaseSuggest = resolve; });
+    throw new Error('Company access required');
+  };
+  await controller.message({ type: 'search', search: '' });
+  assert.equal(controller.browser.error, 'Company access required'); assert.equal(controller.error, undefined);
+  await controller.message({ type: 'suggest', search: 'fail', request: 1 });
+  assert.equal(messages.at(-1).error, 'Company access required');
+  const search = controller.search('late-search'), suggest = controller.suggest({ search: 'late-suggest', request: 2 });
+  await controller.exit(); const count = messages.length;
+  releaseSearch({ questions: [{ titleSlug: 'old-account' }], total: 1 }); releaseSuggest({ questions: [{ titleSlug: 'old-account' }], total: 1 });
+  await Promise.all([search, suggest]);
+  assert.equal(controller.browser.questions.length, 0); assert.equal(messages.length, count);
+  controller.views.delete('problems');
 });

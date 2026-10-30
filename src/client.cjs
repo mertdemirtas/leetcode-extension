@@ -1,5 +1,7 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
+
 const ORIGIN = 'https://leetcode.com';
 const SECRET_KEY = 'leetcode.session.v1';
 
@@ -61,6 +63,8 @@ class LeetCodeClient {
     this.secrets = secrets;
     this.fetch = fetchImpl;
     this.timeout = timeout;
+    this.companyPages = new Map();
+    this.companyOwner = null;
   }
 
   async credentials() {
@@ -74,10 +78,11 @@ class LeetCodeClient {
     const safe = validateCredentials(credentials);
     const account = await this.account(safe);
     await this.secrets.store(SECRET_KEY, JSON.stringify(safe));
+    this.companyPages.clear();
     return account;
   }
 
-  async disconnect() { await this.secrets.delete(SECRET_KEY); }
+  async disconnect() { this.companyOwner = null; this.companyPages.clear(); await this.secrets.delete(SECRET_KEY); }
 
   async request(route, { body, credentials, authenticated = true, mutation = false, referer } = {}) {
     const auth = credentials || (authenticated ? await this.credentials() : undefined);
@@ -126,9 +131,31 @@ class LeetCodeClient {
     return { username: userStatus.username, premium: Boolean(userStatus.isPremium) };
   }
 
-  async list({ search = '', skip = 0, limit = 25, difficulty = '', tag = null } = {}) {
+  async list({ search = '', skip = 0, limit = 25, difficulty = '', tag = null, company = null } = {}) {
+    if (typeof search !== 'string' || search.length > 150 || !Number.isSafeInteger(skip) || skip < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid problem search.');
     if (!['', 'Easy', 'Medium', 'Hard'].includes(difficulty)) throw new Error('Invalid problem difficulty.');
     if (tag !== null) validateSlug(tag);
+    if (company !== null) {
+      validateSlug(company);
+      const saved = await this.secrets.get(SECRET_KEY);
+      const owner = saved ? createHash('sha256').update(saved).digest('hex') : null;
+      if (this.companyOwner !== owner) { this.companyPages.clear(); this.companyOwner = owner; }
+      const cached = this.companyPages.get(company);
+      let questions;
+      if (cached && Date.now() - cached.time < 300000) questions = cached.questions;
+      else {
+        const { companyTag } = await this.graphql(`query companyProblems($slug: String!) {
+          companyTag(slug: $slug) { questions { questionFrontendId title titleSlug difficulty isPaidOnly status topicTags { name slug } } }
+        }`, { slug: company }, { authenticated: Boolean(saved) });
+        if (!Array.isArray(companyTag?.questions)) throw new ConnectionError('premium', 'Company problem lists require access from LeetCode, usually a Premium subscription. Open the company page on LeetCode or clear this filter.');
+        questions = companyTag.questions.map(q => ({ ...q, titleSlug: validateSlug(q.titleSlug) }));
+        if (this.companyPages.size >= 5) this.companyPages.delete(this.companyPages.keys().next().value);
+        if (this.companyOwner === owner) this.companyPages.set(company, { questions, time: Date.now() });
+      }
+      const text = search.trim().toLowerCase();
+      const matches = questions.filter(q => (!difficulty || q.difficulty === difficulty) && (!tag || q.topicTags?.some(t => t.slug === tag)) && (!text || `${q.questionFrontendId} ${q.title}`.toLowerCase().includes(text)));
+      return { total: matches.length, questions: matches.slice(skip, skip + limit) };
+    }
     const filters = {};
     if (search.trim()) filters.searchKeywords = search.trim();
     if (difficulty) filters.difficulty = difficulty.toUpperCase();
@@ -142,6 +169,19 @@ class LeetCodeClient {
     const list = data.problemsetQuestionList;
     if (!Array.isArray(list?.questions) || !Number.isFinite(list.total)) throw new ConnectionError('protocol', 'The problem list format has changed.');
     return { total: list.total, questions: list.questions.map(q => ({ ...q, titleSlug: validateSlug(q.titleSlug) })) };
+  }
+
+  async catalog() {
+    const data = await this.graphql(`query problemFilters {
+      questionTopicTags { edges { node { name slug } } }
+      companyTags { name slug }
+    }`, {}, { authenticated: false });
+    if (!Array.isArray(data.questionTopicTags?.edges) || !Array.isArray(data.companyTags)) throw new ConnectionError('protocol', 'LeetCode did not return problem filters.');
+    const tags = values => [...new Map(values.map(tag => {
+      if (typeof tag?.name !== 'string' || !tag.name.trim() || tag.name.length > 100) throw new ConnectionError('protocol', 'LeetCode returned an invalid filter.');
+      return [validateSlug(tag.slug), { name: tag.name, slug: tag.slug }];
+    })).values()].sort((a, b) => a.name.localeCompare(b.name));
+    return { tags: tags(data.questionTopicTags.edges.map(edge => edge.node)), companies: tags(data.companyTags) };
   }
 
   async problem(slug) {

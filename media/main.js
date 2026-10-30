@@ -5,15 +5,17 @@
   const app = document.getElementById('app');
   const mode = document.body.dataset.mode;
   const previous = api.getState() || {};
-  const ui = { tab: previous.tab || 'cases', caseIndex: previous.caseIndex || 0, groups: previous.groups || { all: true }, searchOpen: Boolean(previous.searchOpen), menuOpen: false, company: previous.company || null, disclosures: previous.disclosures || {} };
+  const ui = { tab: previous.tab || 'cases', caseIndex: previous.caseIndex || 0, groups: previous.groups || { all: true }, searchOpen: Boolean(previous.searchOpen), menuOpen: false, query: previous.query ?? null, tagQuery: '', companyQuery: '', disclosures: previous.disclosures || {} };
   const drafts = new Map();
   const chartCache = new WeakMap();
-  let chartFrame;
+  let chartFrame, suggestionTimer, requestedCatalog = false;
+  const suggestions = { request: 0, questions: [], open: false, loading: false, index: -1, error: null, topic: null };
   Object.assign(ui, { performanceId: null, performanceLoading: false, performanceError: null, performanceRequest: 0 });
   let state;
+  const sidebarState = value => JSON.stringify([value.connection, value.browser, value.catalog, value.favorites, value.knownProblems, value.problem?.titleSlug, value.busy, value.connectionBusy, value.authorizing, value.resultsVisible, value.error]);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const send = (type, fields = {}) => api.postMessage({ type, ...fields });
-  const remember = () => api.setState({ tab: ui.tab, caseIndex: ui.caseIndex, groups: ui.groups, searchOpen: ui.searchOpen, company: ui.company, disclosures: ui.disclosures });
+  const remember = () => api.setState({ tab: ui.tab, caseIndex: ui.caseIndex, groups: ui.groups, searchOpen: ui.searchOpen, query: ui.query, disclosures: ui.disclosures });
   const button = (action, text, extra = '', cls = '') => `<button type="button" data-action="${action}" class="${cls}" ${extra}>${text}</button>`;
   const difficultyClass = value => ({ Easy: 'difficulty-easy', Medium: 'difficulty-medium', Hard: 'difficulty-hard' }[value] || 'muted');
   const busy = () => state.busy ? 'disabled' : '';
@@ -43,24 +45,66 @@
 
   const group = (key, label, content) => `<details class="browser-group" data-group="${key}" ${ui.groups[key] ? 'open' : ''}><summary>${icon('chevron')}<span>${esc(label)}</span></summary><div class="group-body">${content}</div></details>`;
 
+  function filterOptions(kind, values, selected) {
+    const query = ui[kind + 'Query'].toLowerCase();
+    const matches = values.filter(value => value.name.toLowerCase().includes(query)).sort((a,b) => a.name.localeCompare(b.name));
+    return `${values.length > 12 ? `<input type="search" id="${kind}-filter" data-filter-list="${kind}" aria-label="Find ${kind}" placeholder="Find ${kind}…" value="${esc(ui[kind + 'Query'])}">` : ''}<div class="filter-options">${matches.map(value => button(kind === 'tag' ? 'filterTag' : 'filterCompany', esc(value.name), `data-${kind}="${esc(value.slug)}" data-name="${esc(value.name)}" aria-pressed="${selected?.slug === value.slug}"`, 'filter-button')).join('') || '<p class="browser-note">No matching filters.</p>'}</div>`;
+  }
+
+  function renderSuggestions() {
+    const list = document.getElementById('problem-suggestions'), input = document.getElementById('search');
+    if (!list || !input) return;
+    const visible = suggestions.open && ui.searchOpen;
+    list.hidden = !visible;
+    input.setAttribute('aria-expanded', String(visible));
+    if (visible && suggestions.index >= 0) input.setAttribute('aria-activedescendant', `suggestion-${suggestions.index}`);
+    else input.removeAttribute('aria-activedescendant');
+    list.innerHTML = !visible ? '' : suggestions.loading ? '<div class="suggestion-note" role="status">Finding problems…</div>' : suggestions.error ? `<div class="suggestion-note" role="status">${esc(suggestions.error)}</div>` : suggestions.questions.length ? `<div class="suggestion-note" role="presentation">${suggestions.topic ? `Suggested for ${esc(suggestions.topic)}` : 'Suggested problems'}</div>${suggestions.questions.map((p, index) => `<button type="button" tabindex="-1" role="option" id="suggestion-${index}" aria-selected="${suggestions.index === index}" data-recommend-slug="${esc(p.titleSlug)}" class="suggestion problem-row ${difficultyClass(p.difficulty)}"><span class="problem-status good">${p.status === 'ac' ? '✓' : ''}</span><span class="problem-number">[${esc(p.questionFrontendId)}]</span><span class="name">${esc(p.title)}</span><span class="problem-level">${esc(p.difficulty?.[0])}</span></button>`).join('')}` : '<div class="suggestion-note" role="status">No suggestions. Try a title, number, or topic.</div>';
+  }
+
+  function closeSuggestions() {
+    clearTimeout(suggestionTimer); suggestions.request++;
+    Object.assign(suggestions, { open: false, loading: false, questions: [], index: -1, error: null, topic: null });
+    renderSuggestions();
+  }
+
+  function requestSuggestions() {
+    closeSuggestions();
+    const search = ui.query.trim();
+    if (!search) return;
+    Object.assign(suggestions, { open: true, loading: true }); renderSuggestions();
+    const request = suggestions.request;
+    suggestionTimer = setTimeout(() => send('suggest', { search, request, filters: state.browser.filters || {} }), 250);
+  }
+
+  function browse(search = '', filters = { difficulty: '', tag: null, company: null }) {
+    closeSuggestions();
+    ui.query = search; ui.groups.all = true;
+    state.browser = { ...state.browser, search, filters, questions: [], total: 0, loading: true, error: null };
+    remember(); render(); send('search', { search, filters });
+  }
+
   function sidebar() {
     const c = state.connection;
     const status = state.authorizing ? 'Complete authorization in your browser. Exit cancels sign-in.' : c.status === 'restoring' ? 'Restoring saved session…' : c.status === 'connected' ? `Connected as ${c.username}` : c.status === 'disconnected' ? 'Not connected' : c.error || 'Reconnect to continue';
-    const filters = state.browser.filters || { difficulty: '', tag: null };
+    const filters = state.browser.filters || { difficulty: '', tag: null, company: null };
+    const catalog = state.catalog || {};
     const known = (state.knownProblems || []).map(problem => ({ ...problem, status: state.browser.questions.find(item => item.titleSlug === problem.titleSlug)?.status || problem.status }));
-    const topics = new Map(), companies = new Map();
-    for (const p of [...known, ...state.browser.questions]) for (const tag of p.topicTags || []) if (tag.slug) topics.set(tag.slug, tag);
-    for (const p of known) for (const company of p.companies || []) companies.set(company.slug, company);
-    const rows = ui.company ? known.filter(p => p.companies?.some(company => company.slug === ui.company.slug) && (!filters.difficulty || p.difficulty === filters.difficulty) && (!filters.tag || p.topicTags?.some(tag => tag.slug === filters.tag.slug)) && `${p.questionFrontendId} ${p.title}`.toLowerCase().includes(state.browser.search.toLowerCase())) : state.browser.questions;
-    const filterNames = [filters.difficulty, filters.tag?.name, ui.company?.name].filter(Boolean);
+    const topics = new Map((catalog.tags || []).map(tag => [tag.slug, tag])), companies = new Map((catalog.companies || []).map(company => [company.slug, company]));
+    for (const p of [...known, ...state.browser.questions]) for (const tag of p.topicTags || []) if (tag.slug && !topics.has(tag.slug)) topics.set(tag.slug, tag);
+    for (const p of known) for (const company of p.companies || []) if (company.slug && !companies.has(company.slug)) companies.set(company.slug, company);
+    const rows = state.browser.questions;
+    const filterNames = [filters.difficulty, filters.tag?.name, filters.company?.name].filter(Boolean);
     const activeFilter = filterNames.length || state.browser.search;
-    const list = `${activeFilter ? `<div class="active-filters"><span>${esc([state.browser.search, ...filterNames].filter(Boolean).join(' · '))}</span>${button('browse', 'Clear', '', 'quiet')}</div>` : ''}${state.browser.loading ? '<p class="browser-note" role="status">Loading problems…</p>' : ''}${state.browser.error ? `<p class="browser-note bad">${esc(state.browser.error)}</p>` : ''}<div class="problem-list">${problemRows(rows)}</div>${!rows.length && !state.browser.loading ? `<p class="browser-note">${activeFilter ? 'No matching problems.' : 'Search or browse LeetCode problems.'}</p>${button('browse', 'Browse problems', '', 'quiet')}` : ''}${!ui.company && rows.length < state.browser.total ? `<div class="load-more">${button('more', 'Load more', state.browser.loading ? 'disabled' : '', 'quiet')}</div>` : ''}${ui.company ? '<p class="browser-note">From opened problems</p>' : rows.length ? `<p class="browser-note catalog-count">${rows.length} of ${esc(state.browser.total)}</p>` : ''}`;
-    app.innerHTML = `<header class="side-controls"><span class="side-label">LEETCODE</span><div class="side-icons" aria-label="LeetCode connection controls">${iconButton('connect', 'connect', c.status === 'connected' ? `Connected as ${c.username}` : 'Connect to LeetCode', `${busy()} aria-pressed="${c.status === 'connected'}"`, c.status === 'connected' ? 'good' : '')}${iconButton('toggleSearch', 'search', 'Search problems', `aria-expanded="${ui.searchOpen}"`)}${iconButton('refresh', 'refresh', 'Refresh connection', state.connectionBusy ? 'disabled' : '')}${iconButton('exit', 'exit', 'Exit and sign out', state.connectionBusy && !state.authorizing ? 'disabled' : '')}${iconButton('toggleMenu', 'more', 'More LeetCode actions', `aria-expanded="${ui.menuOpen}"`)}</div></header>
+    const catalogNote = catalog.loading ? '<p class="browser-note" role="status">Loading filters…</p>' : catalog.error ? `<p class="browser-note bad" role="status">${esc(catalog.error)}</p>${button('retryCatalog', 'Retry filters', '', 'quiet')}` : '';
+    const list = `${activeFilter ? `<div class="active-filters"><span>${esc([state.browser.search, ...filterNames].filter(Boolean).join(' · '))}</span>${button('browse', 'Clear', '', 'quiet')}</div>` : ''}${state.browser.loading ? '<p class="browser-note" role="status">Loading problems…</p>' : ''}${state.browser.error ? `<p class="browser-note bad" role="status">${esc(state.browser.error)}</p>${button('retrySearch', 'Retry', '', 'quiet')}${filters.company ? button('companyLink', 'Open company on LeetCode', '', 'quiet') : ''}` : ''}<div class="problem-list">${problemRows(rows)}</div>${!rows.length && !state.browser.loading && !state.browser.error ? `<p class="browser-note">${activeFilter ? 'No matching problems.' : 'Search or browse LeetCode problems.'}</p>${button('browse', 'Browse problems', '', 'quiet')}` : ''}${rows.length < state.browser.total ? `<div class="load-more">${button('more', 'Load more', state.browser.loading ? 'disabled' : '', 'quiet')}</div>` : ''}${rows.length ? `<p class="browser-note catalog-count">${rows.length} of ${esc(state.browser.total)}</p>` : ''}`;
+    app.innerHTML = `<header class="side-controls"><span class="side-label">LEETCODE</span><div class="side-icons" aria-label="LeetCode connection controls">${iconButton('connect', 'connect', c.status === 'connected' ? `Connected as ${c.username}` : 'Connect to LeetCode', `${busy()} aria-pressed="${c.status === 'connected'}"`, c.status === 'connected' ? 'good' : '')}${iconButton('toggleSearch', 'search', 'Search problems', `aria-expanded="${ui.searchOpen}"`)}${iconButton('refresh', 'refresh', 'Refresh connection and problems', state.connectionBusy ? 'disabled' : '')}${iconButton('exit', 'exit', 'Exit and sign out', state.connectionBusy && !state.authorizing ? 'disabled' : '')}${iconButton('toggleMenu', 'more', 'More LeetCode actions', `aria-expanded="${ui.menuOpen}"`)}</div></header>
       <div class="connection-note ${c.status === 'connected' && !state.authorizing ? 'sr-only' : 'muted'}" role="status">${esc(status)}</div>${errorBanner()}
       ${ui.menuOpen ? `<div class="side-menu">${button('daily', 'Daily challenge', '', 'quiet')}${button('settings', 'Extension settings', '', 'quiet')}${button('chooseSavePath', 'Choose save folder', '', 'quiet')}</div>` : ''}
-      <form class="search" id="problem-search" ${ui.searchOpen || state.browser.search ? '' : 'hidden'}><input type="search" id="search" aria-label="Search LeetCode problems" maxlength="150" placeholder="Find a problem…" value="${esc(state.browser.search)}"><button type="submit" class="icon-button quiet" aria-label="Search" title="Search">${icon('search')}</button></form>
-      <div class="browser-groups">${group('all', 'All', list)}${group('difficulty', 'Difficulty', ['Easy','Medium','Hard'].map(level => button('filterDifficulty', esc(level), `data-difficulty="${level}" aria-pressed="${filters.difficulty === level}"`, `filter-button ${difficultyClass(level)}`)).join(''))}${group('tag', 'Tag', topics.size ? [...topics.values()].sort((a,b) => a.name.localeCompare(b.name)).map(tag => button('filterTag', esc(tag.name), `data-tag="${esc(tag.slug)}" data-name="${esc(tag.name)}" aria-pressed="${filters.tag?.slug === tag.slug}"`, 'filter-button')).join('') : '<p class="browser-note">Tags appear as problems load.</p>')}${group('company', 'Company', companies.size ? [...companies.values()].sort((a,b) => a.name.localeCompare(b.name)).map(company => button('filterCompany', esc(company.name), `data-company="${esc(company.slug)}" data-name="${esc(company.name)}" aria-pressed="${ui.company?.slug === company.slug}"`, 'filter-button')).join('') + '<p class="browser-note">From opened problems</p>' : '<p class="browser-note">Open a problem to see available company tags.</p>')}${group('favorite', 'Favorite', problemRows(known.filter(p => state.favorites?.includes(p.titleSlug))) || '<p class="browser-note">Save a problem with its bookmark button.</p>')}</div>
+      <div class="search-area" ${ui.searchOpen ? '' : 'hidden'}><form class="search" id="problem-search"><input type="search" id="search" role="combobox" aria-autocomplete="list" aria-controls="problem-suggestions" aria-expanded="false" aria-label="Search LeetCode problems" autocomplete="off" maxlength="150" placeholder="Find a title, number, or topic…" value="${esc(ui.query)}"><button type="submit" class="icon-button quiet" aria-label="Search" title="Search">${icon('search')}</button></form><div id="problem-suggestions" class="suggestions" role="listbox" aria-label="Suggested problems" hidden></div></div>
+      <div class="browser-groups">${group('all', 'All', list)}${group('difficulty', 'Difficulty', ['Easy','Medium','Hard'].map(level => button('filterDifficulty', esc(level), `data-difficulty="${level}" aria-pressed="${filters.difficulty === level}"`, `filter-button ${difficultyClass(level)}`)).join(''))}${group('tag', 'Tag', catalogNote + (topics.size ? filterOptions('tag', [...topics.values()], filters.tag) : '<p class="browser-note">No topic filters available.</p>'))}${group('company', 'Company', catalogNote + (companies.size ? filterOptions('company', [...companies.values()], filters.company) : '<p class="browser-note">No company filters available.</p>'))}${group('favorite', 'Favorite', problemRows(known.filter(p => state.favorites?.includes(p.titleSlug))) || '<p class="browser-note">Save a problem with its bookmark button.</p>')}</div>
       <footer class="side-footer">${button('toggleResults', icon('panel') + 'Results', `aria-expanded="${Boolean(state.resultsVisible)}" title="Toggle Tests & Results"`, 'quiet')}${button('chooseSavePath', icon('folder') + 'Save folder', '', 'quiet')}</footer>`;
+    renderSuggestions();
   }
 
   function sanitizeProblem(content) {
@@ -210,17 +254,41 @@
     send('saveCases', { slug: state.problem.titleSlug, cases: state.cases });
   }
 
-  app.addEventListener('submit', event => { event.preventDefault(); if (event.target.id === 'problem-search') { ui.company = null; ui.groups.all = true; remember(); send('search', { search: document.getElementById('search').value }); } });
+  app.addEventListener('submit', event => { event.preventDefault(); if (event.target.id === 'problem-search') browse(ui.query.trim(), state.browser.filters || {}); });
   app.addEventListener('input', event => {
+    if (event.target.id === 'search') { ui.query = event.target.value; remember(); requestSuggestions(); }
+    if (event.target.dataset.filterList) { ui[event.target.dataset.filterList + 'Query'] = event.target.value; render(); }
     if (event.target.dataset.field) { state.cases[ui.caseIndex][event.target.dataset.field] = event.target.value; saveDraft(); }
   });
   app.addEventListener('toggle', event => {
-    if (event.target.dataset.group) ui.groups[event.target.dataset.group] = event.target.open;
-    else if (event.target.dataset.disclosure) ui.disclosures[event.target.dataset.disclosure] = event.target.open;
+    if (!app.contains(event.target)) return;
+    if (event.target.dataset.group) {
+      const key = event.target.dataset.group, changed = Boolean(ui.groups[key]) !== event.target.open;
+      ui.groups[key] = event.target.open;
+      if (!changed) return;
+      if (key === 'all' && event.target.open && (state.browser.search || Object.values(state.browser.filters || {}).some(Boolean))) browse();
+      if (['tag', 'company'].includes(key) && event.target.open && !state.catalog?.loaded) send('loadCatalog');
+    } else if (event.target.dataset.disclosure) ui.disclosures[event.target.dataset.disclosure] = event.target.open;
     else return;
     remember();
   }, true);
+  app.addEventListener('pointerdown', event => {
+    if (event.target.closest('[data-recommend-slug]')) event.preventDefault();
+    else if (!event.target.closest('.search-area')) closeSuggestions();
+  });
+  app.addEventListener('focusout', event => {
+    if (event.target.id === 'search') queueMicrotask(() => { if (!document.activeElement?.closest('.search-area')) closeSuggestions(); });
+  });
   app.addEventListener('keydown', event => {
+    if (event.target.id === 'search' && ['ArrowDown', 'ArrowUp'].includes(event.key) && suggestions.questions.length) {
+      event.preventDefault(); suggestions.open = true;
+      suggestions.index = (suggestions.index + (event.key === 'ArrowDown' ? 1 : suggestions.index < 0 ? 0 : -1) + suggestions.questions.length) % suggestions.questions.length;
+      renderSuggestions(); document.getElementById(`suggestion-${suggestions.index}`)?.scrollIntoView({ block: 'nearest' }); return;
+    }
+    if (event.target.id === 'search' && event.key === 'Enter' && suggestions.open && suggestions.index >= 0) {
+      event.preventDefault(); const slug = suggestions.questions[suggestions.index].titleSlug; closeSuggestions(); send('openProblem', { slug }); return;
+    }
+    if (event.target.id === 'search' && event.key === 'Escape' && suggestions.open) { event.preventDefault(); closeSuggestions(); return; }
     const tab = event.target.closest('[role="tab"]');
     if (tab && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {
       event.preventDefault(); const tabs = [...app.querySelectorAll('[role="tab"]')], current = tabs.indexOf(tab);
@@ -228,28 +296,28 @@
       const key = tabs[index].dataset.tab; tabs[index].click(); app.querySelector(`[data-tab="${key}"]`).focus();
     }
     if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && mode === 'description' && state.problem && !state.busy) { event.preventDefault(); send(event.shiftKey ? 'submit' : 'run', { slug: state.problem.titleSlug }); }
-    if (event.key === 'Escape' && mode === 'problems' && (ui.menuOpen || ui.searchOpen)) { ui.menuOpen = false; ui.searchOpen = false; remember(); render(); }
+    if (event.key === 'Escape' && mode === 'problems' && (ui.menuOpen || ui.searchOpen)) { ui.menuOpen = false; ui.searchOpen = false; closeSuggestions(); remember(); render(); }
   });
   app.addEventListener('click', event => {
     const link = event.target.closest('[data-external]');
     if (link) { event.preventDefault(); send('openExternal', { url: link.dataset.external }); return; }
     const target = event.target.closest('button');
     if (!target) return;
-    if (target.dataset.slug) { send('openProblem', { slug: target.dataset.slug }); return; }
+    if (target.dataset.slug || target.dataset.recommendSlug) { const slug = target.dataset.slug || target.dataset.recommendSlug; closeSuggestions(); send('openProblem', { slug }); return; }
     if (target.dataset.tab) { ui.tab = target.dataset.tab; remember(); render(); if (ui.tab === 'history') send('loadHistory'); return; }
     if (target.dataset.case !== undefined) { ui.caseIndex = Number(target.dataset.case); remember(); render(); return; }
     const action = target.dataset.action;
-    if (action === 'toggleSearch') { ui.searchOpen = !ui.searchOpen; remember(); render(); if (ui.searchOpen) document.getElementById('search').focus(); }
+    if (action === 'toggleSearch') { ui.searchOpen = !ui.searchOpen; closeSuggestions(); remember(); render(); if (ui.searchOpen) document.getElementById('search').focus(); }
     else if (action === 'toggleMenu') { ui.menuOpen = !ui.menuOpen; render(); }
-    else if (['filterDifficulty','filterTag','filterCompany','browse'].includes(action)) {
-      const filters = { ...(state.browser.filters || { difficulty: '', tag: null }) };
-      ui.groups.all = true; ui.company = null;
+    else if (['filterDifficulty','filterTag','filterCompany','browse','retrySearch'].includes(action)) {
+      const filters = { ...(state.browser.filters || { difficulty: '', tag: null, company: null }) };
       if (action === 'filterDifficulty') filters.difficulty = filters.difficulty === target.dataset.difficulty ? '' : target.dataset.difficulty;
       if (action === 'filterTag') filters.tag = filters.tag?.slug === target.dataset.tag ? null : { slug: target.dataset.tag, name: target.dataset.name };
-      if (action === 'filterCompany') { ui.company = { slug: target.dataset.company, name: target.dataset.name }; remember(); render(); return; }
-      if (action === 'browse') { filters.difficulty = ''; filters.tag = null; }
-      remember(); send('search', { search: action === 'browse' ? '' : state.browser.search, filters });
+      if (action === 'filterCompany') filters.company = filters.company?.slug === target.dataset.company ? null : { slug: target.dataset.company, name: target.dataset.name };
+      if (action === 'browse') browse(); else browse(ui.query.trim(), filters);
     }
+    else if (action === 'retryCatalog') send('loadCatalog', { force: true });
+    else if (action === 'companyLink') send('openExternal', { url: `https://leetcode.com/company/${state.browser.filters.company.slug}/` });
     else if (['connect','refresh','exit','daily','more','showResults','toggleResults','minimize','clearError','chooseSavePath','settings','loadHistory','moreHistory'].includes(action)) { if (ui.menuOpen) { ui.menuOpen = false; render(); } send(action); }
     else if (action === 'toggleFavorite') send(action, { slug: state.problem.titleSlug });
     else if (action === 'submissionPerformance') {
@@ -273,6 +341,12 @@
   new ResizeObserver(scheduleCharts).observe(app);
 
   window.addEventListener('message', event => {
+    if (event.data?.type === 'suggestions') {
+      const response = event.data;
+      if (mode !== 'problems' || !suggestions.open || response.request !== suggestions.request || response.search !== ui.query.trim()) return;
+      Object.assign(suggestions, { questions: response.questions || [], loading: false, error: response.error || null, topic: response.topic || null, index: -1 });
+      renderSuggestions(); return;
+    }
     if (event.data?.type === 'submissionPerformance') {
       const response = event.data;
       if (response.id !== ui.performanceId || response.request !== ui.performanceRequest || response.slug !== state.problem?.titleSlug || response.owner !== state.connection.username) return;
@@ -292,17 +366,23 @@
     }
     if (event.data?.type !== 'state') return;
     const next = event.data.state;
+    const sidebarUnchanged = mode === 'problems' && state && sidebarState(state) === sidebarState(next);
     const previousRecord = state?.record;
     const selectedChanged = state?.problem?.titleSlug !== next.problem?.titleSlug;
     if (selectedChanged || (state && state.connection.username !== next.connection.username)) { ui.performanceId = null; ui.performanceLoading = false; ui.performanceError = null; }
     if (next.problem && drafts.has(next.problem.titleSlug)) next.cases = structuredClone(drafts.get(next.problem.titleSlug));
     if (selectedChanged) ui.caseIndex = 0;
     if (next.record && (next.record.id !== previousRecord?.id || next.record.status !== previousRecord?.status)) { ui.tab = 'results'; remember(); }
+    if (mode === 'problems') {
+      if (ui.query === null) { ui.query = next.browser.search; if (ui.query) ui.searchOpen = true; }
+      if (state && (state.connection.username !== next.connection.username || JSON.stringify(state.browser.filters) !== JSON.stringify(next.browser.filters))) closeSuggestions();
+    }
     state = next;
+    if (mode === 'problems' && !requestedCatalog) { requestedCatalog = true; send('loadCatalog'); }
     if (mode === 'results' && ui.tab === 'history' && selectedChanged) send('loadHistory');
     const focused = document.activeElement;
     if (mode === 'results' && ui.tab === 'cases' && focused?.dataset.field && !selectedChanged) return;
-    if (mode === 'problems' && focused?.id === 'search' && !next.browser.loading) return;
+    if (sidebarUnchanged) return;
     render();
   });
   send('ready');

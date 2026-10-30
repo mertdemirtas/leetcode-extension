@@ -173,3 +173,38 @@ test('submission status lookup requests the verdict without downloading source c
   client.fetch = async () => response({ data: { submissionDetails: { statusCode: null, user: { username: 'fixture-account' } } } });
   await assert.rejects(client.submissionStatus('42'), { code: 'unavailable' });
 });
+
+
+test('sidebar catalog uses all server topics and companies and rejects malformed entries', async () => {
+  let query;
+  const client = new LeetCodeClient({ secrets: secrets(), fetchImpl: async (_url, options) => {
+    query = JSON.parse(options.body).query;
+    return response({ data: { questionTopicTags: { edges: [{ node: { name: 'Graph Theory', slug: 'graph' } }] }, companyTags: [{ name: 'Google', slug: 'google' }, { name: 'Google', slug: 'google' }] } });
+  } });
+  assert.deepEqual(await client.catalog(), { tags: [{ name: 'Graph Theory', slug: 'graph' }], companies: [{ name: 'Google', slug: 'google' }] });
+  assert.match(query, /questionTopicTags/); assert.match(query, /companyTags/);
+  client.fetch = async () => response({ data: { questionTopicTags: { edges: [] }, companyTags: [{ name: 'Invalid', slug: '../bad' }] } });
+  await assert.rejects(client.catalog());
+});
+
+test('company browsing filters and pages the server list, keeps its cache private, and respects account changes', async () => {
+  let requests = 0, token;
+  const client = new LeetCodeClient({ secrets: { get: async () => token }, fetchImpl: async () => {
+    requests++;
+    return response({ data: { companyTag: { questions: [
+      { titleSlug: 'two-sum', title: 'Two Sum', questionFrontendId: '1', difficulty: 'Easy', topicTags: [{ slug: 'array' }] },
+      { titleSlug: 'three-sum', title: 'Three Sum', questionFrontendId: '15', difficulty: 'Medium', topicTags: [{ slug: 'array' }] }
+    ] } } });
+  } });
+  assert.equal((await client.list({ company: 'google', limit: 1 })).total, 2);
+  assert.equal((await client.list({ company: 'google', skip: 1, limit: 1 })).questions[0].titleSlug, 'three-sum');
+  assert.equal((await client.list({ company: 'google', difficulty: 'Easy', tag: 'array', search: 'sum' })).total, 1);
+  assert.equal(requests, 1);
+  token = JSON.stringify({ session: 'fixture-session', csrf: 'fixture-csrf' });
+  await client.list({ company: 'google' }); assert.equal(requests, 2);
+  client.fetch = async () => response({ data: { companyTag: null } });
+  await assert.rejects(client.list({ company: 'amazon' }), { code: 'premium' });
+  await assert.rejects(client.list({ company: '../bad' }));
+  await assert.rejects(client.list({ limit: 500 }));
+  await assert.rejects(client.list({ skip: -1 }));
+});

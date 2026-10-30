@@ -14,6 +14,16 @@ const PREFIX = 'singularityLeetcode';
 const esc = text => String(text).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const hash = code => createHash('sha256').update(code).digest('hex').slice(0, 12);
 
+function problemFilters(filters = {}) {
+  if (!filters || !['', 'Easy', 'Medium', 'Hard'].includes(filters.difficulty || '')) throw new Error('Invalid problem filters.');
+  const result = { difficulty: filters.difficulty || '', tag: null, company: null };
+  for (const key of ['tag', 'company']) if (filters[key] != null) {
+    if (typeof filters[key].name !== 'string' || !filters[key].name.trim() || filters[key].name.length > 100) throw new Error('Invalid problem filters.');
+    result[key] = { name: filters[key].name, slug: validateSlug(filters[key].slug) };
+  }
+  return result;
+}
+
 function html(webview, context, mode) {
   const nonce = randomBytes(24).toString('base64');
   const resource = filename => webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'media', filename));
@@ -32,11 +42,13 @@ class Controller {
     this.saved.favorites ||= [];
     this.client = new LeetCodeClient({ secrets: context.secrets, timeout: this.config('requestTimeout', 20000) });
     this.connection = { status: 'disconnected', username: null, error: null };
-    this.browser = { questions: [], total: 0, search: '', filters: { difficulty: '', tag: null }, loading: false, error: null };
+    this.browser = { questions: [], total: 0, search: '', filters: { difficulty: '', tag: null, company: null }, loading: false, error: null };
     this.views = new Map();
     this.displayed = null;
     this.currentHash = null;
     this.searchGeneration = 0;
+    this.suggestionGeneration = 0;
+    this.catalog = { tags: [], companies: [], loaded: false, loading: false, error: null };
     this.authVersion = 0;
     this.connecting = false;
     this.saveQueue = Promise.resolve();
@@ -71,11 +83,11 @@ class Controller {
       return { ...rest, result: result ? { ...result, raw: undefined } : undefined };
     };
     return {
-      connection: this.connection, browser: this.browser, problem: problem ? { ...problem, codeSnippets: problem.codeSnippets.map(s => ({ lang: s.lang, langSlug: s.langSlug })) } : null,
+      connection: this.connection, browser: this.browser, catalog: this.catalog, problem: problem ? { ...problem, codeSnippets: problem.codeSnippets.map(s => ({ lang: s.lang, langSlug: s.langSlug })) } : null,
       language: this.saved.language, cases: this.saved.cases[this.saved.selected] || [],
       history: mergeSubmissions(history, this.remoteHistory()).map(summary),
       submissionHistory: this.submissions.slug === this.saved.selected && this.submissions.owner === this.connection.username ? { loading: this.submissions.loading, error: this.submissions.error, hasNext: this.submissions.hasNext } : {},
-      record: summary(record), busy: this.judge.busy || Boolean(this.executing) || this.connecting || Boolean(this.restoring), connectionBusy: this.connecting || Boolean(this.restoring), authorizing: Boolean(this.browserAuth?.pending),
+      record: summary(record), busy: this.judge.busy || Boolean(this.executing) || this.connecting || Boolean(this.restoring) || Boolean(this.refreshing), connectionBusy: this.connecting || Boolean(this.restoring) || Boolean(this.refreshing), authorizing: Boolean(this.browserAuth?.pending),
       changedSinceRun: Boolean(record?.snapshot && this.currentHash && record.snapshot !== this.currentHash),
       resultsVisible: Boolean(this.views.get('results')?.visible),
       favorites: this.saved.favorites,
@@ -178,13 +190,12 @@ class Controller {
     try {
       if (await this.context.secrets.get(SECRET_KEY)) {
         await this.refresh(false);
-        if (this.connection.status === 'connected') await this.search(this.browser.search);
       } else this.connection = { status: 'disconnected', username: null, error: null };
     } finally { this.restoring = false; this.publish(); }
   }
 
   async connect() {
-    if (this.judge.busy || this.executing || this.connecting || this.restoring) throw new Error('Wait for the current connection or judge request before changing accounts.');
+    if (this.judge.busy || this.executing || this.connecting || this.restoring || this.refreshing) throw new Error('Wait for the current connection or judge request before changing accounts.');
     this.connecting = true; this.authVersion++; this.publish();
     try { return await this.performConnect(); }
     finally { this.connecting = false; this.publish(); }
@@ -235,6 +246,8 @@ class Controller {
 
   async refresh(notify = true) {
     if (this.connecting) throw new Error('Wait for the connection setup to finish.');
+    if (this.refreshing) return;
+    this.refreshing = true; this.publish();
     const authVersion = this.authVersion;
     this.client.timeout = this.config('requestTimeout', 20000);
     try {
@@ -244,14 +257,18 @@ class Controller {
       this.publish();
       const pending = this.journal.list().find(r => r.owner === account.username && r.remoteId && r.status === 'pending');
       if (pending && !this.judge.busy) await this.judge.resume(pending.id, account.username);
+      if (authVersion === this.authVersion) await this.search(this.browser.search);
+      await this.loadCatalog(true);
     } catch (error) { if (authVersion === this.authVersion) this.report(error, notify); }
-    finally { this.publish(); }
+    finally { this.refreshing = false; this.publish(); }
   }
 
   async exit() {
     if (this.connecting && !this.browserAuth?.pending) throw new Error('Wait for connection validation to finish before signing out.');
     this.browserAuth?.cancel();
     this.authVersion++;
+    this.searchGeneration++; this.suggestionGeneration++;
+    this.browser = { ...this.browser, questions: [], total: 0, loading: false, error: null };
     this.historyGeneration++;
     this.submissions = { records: [] };
     this.judge.cancel();
@@ -262,23 +279,45 @@ class Controller {
     this.publish();
   }
 
-  async search(search = '', append = false, filters = this.browser.filters || { difficulty: '', tag: null }) {
-    if (typeof search !== 'string' || search.length > 150) throw new Error('Search text is too long.');
-    if (!filters || !['', 'Easy', 'Medium', 'Hard'].includes(filters.difficulty || '') || (filters.tag !== null && filters.tag !== undefined && (typeof filters.tag.name !== 'string' || filters.tag.name.length > 100))) throw new Error('Invalid problem filters.');
-    if (filters.tag) validateSlug(filters.tag.slug);
-    filters = { difficulty: filters.difficulty || '', tag: filters.tag ? { name: filters.tag.name, slug: filters.tag.slug } : null };
-    const generation = ++this.searchGeneration;
-    const skip = append ? this.browser.questions.length : 0;
-    this.browser = { ...this.browser, search, filters, loading: true, error: null };
+  async loadCatalog(force = false) {
+    if (this.catalog.loading || (this.catalog.loaded && !force)) return;
+    this.catalog = { ...this.catalog, loading: true, error: null }; this.publish();
+    try { this.catalog = { ...await this.client.catalog(), loaded: true, loading: false, error: null }; }
+    catch (error) { this.catalog = { ...this.catalog, loading: false, error: error.message }; }
     this.publish();
+  }
+
+  async search(search = '', append = false, filters = this.browser.filters) {
+    if (typeof search !== 'string' || search.length > 150) throw new Error('Search text is too long.');
+    filters = problemFilters(filters);
+    if (append && this.browser.loading) return;
+    const generation = ++this.searchGeneration, authVersion = this.authVersion;
+    const skip = append ? this.browser.questions.length : 0;
+    this.browser = { ...this.browser, questions: append ? this.browser.questions : [], total: append ? this.browser.total : 0, search, filters, loading: true, error: null };
+    this.publish();
+    const active = () => generation === this.searchGeneration && authVersion === this.authVersion;
     try {
-      const page = await this.client.list({ search, skip, difficulty: filters.difficulty, tag: filters.tag?.slug || null });
-      if (generation !== this.searchGeneration) return;
+      const page = await this.client.list({ search, skip, difficulty: filters.difficulty, tag: filters.tag?.slug || null, company: filters.company?.slug || null });
+      if (!active()) return;
       this.browser = { questions: append ? [...this.browser.questions, ...page.questions] : page.questions, total: page.total, search, filters, loading: false, error: null };
     } catch (error) {
-      if (generation === this.searchGeneration) this.browser = { ...this.browser, loading: false, error: error.message };
-      throw error;
-    } finally { this.publish(); }
+      if (active()) this.browser = { ...this.browser, loading: false, error: error.message };
+    } finally { if (active()) this.publish(); }
+  }
+
+  async suggest(message) {
+    if (typeof message.search !== 'string' || message.search.length > 150 || !Number.isSafeInteger(message.request) || message.request < 0) throw new Error('Invalid problem suggestion request.');
+    const filters = problemFilters(message.filters), search = message.search.trim();
+    const generation = ++this.suggestionGeneration, authVersion = this.authVersion;
+    const response = { type: 'suggestions', request: message.request, search, questions: [] };
+    if (search) try {
+      const normalize = text => text.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const topic = !filters.tag && this.catalog.tags.find(tag => [tag.name, tag.slug].some(value => normalize(value) === normalize(search)));
+      const page = await this.client.list({ search: topic ? '' : search, limit: 6, difficulty: filters.difficulty, tag: filters.tag?.slug || topic?.slug || null, company: filters.company?.slug || null });
+      response.questions = page.questions.slice(0, 6);
+      if (topic) response.topic = topic.name;
+    } catch (error) { response.error = error.message; }
+    if (generation === this.suggestionGeneration && authVersion === this.authVersion) await this.views.get('problems')?.webview.postMessage(response);
   }
 
   async openProblem(slug, language) {
@@ -474,6 +513,8 @@ class Controller {
         this.saved.favorites = this.saved.favorites.includes(message.slug) ? this.saved.favorites.filter(slug => slug !== message.slug) : [...this.saved.favorites, message.slug];
         await this.persist(); this.publish(); break;
       }
+      case 'loadCatalog': await this.loadCatalog(Boolean(message.force)); break;
+      case 'suggest': await this.suggest(message); break;
       case 'search': await this.search(message.search, false, message.filters || this.browser.filters); break;
       case 'more': await this.search(this.browser.search, true); break;
       case 'daily': await this.openProblem(await this.client.daily()); break;

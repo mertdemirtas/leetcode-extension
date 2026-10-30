@@ -55,6 +55,10 @@ const { pathToFileURL } = require('node:url');
         while (controller.restoring) await new Promise(resolve => setTimeout(resolve, 10));
         const problem = { questionId:'1', questionFrontendId:'1', title:'Two Sum', titleSlug:'two-sum', difficulty:'Easy', topicTags:[{name:'Array'},{name:'Hash table'}], content:'<p>Find two indices whose numbers add up to target.</p><pre>Input: nums = [2,7,11,15], target = 9\\nOutput: [0,1]</pre>', sampleTestCase:'[2,7,11,15]\\n9', metaData:JSON.stringify({params:[{},{}]}), codeSnippets:[{lang:'Python3',langSlug:'python3',code:'class Solution:\\n    def twoSum(self, nums, target):\\n        seen = {}\\n        for i, n in enumerate(nums):\\n            if target - n in seen:\\n                return [seen[target - n], i]\\n            seen[n] = i'}] };
         controller.client.problem = async () => problem;
+      controller.catalog = { tags: [{name:'Array',slug:'array'},{name:'Hash Table',slug:'hash-table'}], companies: [{name:'Google',slug:'google'}], loaded:true, loading:false, error:null };
+      controller.client.catalog = async () => ({tags:controller.catalog.tags,companies:controller.catalog.companies});
+      controller.client.list = async ({search='',difficulty='',company=null,tag=null}={}) => ({questions:[{...problem,titleSlug:difficulty==='Medium'||company||tag==='hash-table'?'three-sum':'two-sum',title:difficulty==='Medium'||company||tag==='hash-table'?'Three Sum':'Two Sum',questionFrontendId:difficulty==='Medium'||company||tag==='hash-table'?'15':'1',difficulty:difficulty||'Easy'}],total:1});
+
       controller.client.submissions=async()=>({submissions:[['1042839576',10,'Accepted'],['1042839577',0,'Pending'],['1042839578',11,'Wrong Answer'],['1042839579',14,'Time Limit Exceeded']].map(([id,status,statusDisplay])=>({id,titleSlug:'two-sum',title:'Two Sum',lang:'python3',status,statusDisplay,isPending:status===0?'Pending':'Not Pending',runtime:'3 ms',memory:'19.2 MB',timestamp:'1793057511'})),hasNext:false,lastKey:null});
       controller.client.submissionStatus=async()=>({statusCode:10,question:{titleSlug:'two-sum'},user:{username:'fixture-account'}});
       controller.client.submissionDetails=async id=>({code:id==='1042839577'?'# Website submission fixture':problem.codeSnippets[0].code,statusCode:10,runtime:3,runtimeDisplay:'3 ms',runtimePercentile:91.8,runtimeDistribution:JSON.stringify({distribution:[[1,10],[2,20],[3,40],[4,20],[5,10]]}),memory:19200000,memoryDisplay:'19.2 MB',memoryPercentile:82.4,memoryDistribution:JSON.stringify({distribution:[[18000,10],[19000,40],[20000,30],[21000,20]]}),totalCorrect:63,totalTestcases:63,lang:{name:'python3'},question:{titleSlug:'two-sum'},user:{username:'fixture-account'}});
@@ -138,6 +142,7 @@ const { pathToFileURL } = require('node:url');
     }
     const sidebar = await modeFrame('problems');
     assert.equal((await sidebar.$$('.side-controls button')).length, 5);
+    await require('./check-sidebar.cjs')(sidebar);
     const description = await modeFrame('description');
     assert.equal((await description.$$('.workbench-toolbar,[data-action="run"],[data-action="submit"]')).length, 0);
     async function nativeAction(label) {
